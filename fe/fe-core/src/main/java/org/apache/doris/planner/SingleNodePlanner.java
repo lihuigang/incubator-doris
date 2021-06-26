@@ -73,7 +73,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.HashSet;
 import java.util.Set;
-import java.util.UUID;
 
 /**
  * Constructs a non-executable single-node plan from an analyzed parse tree.
@@ -86,7 +85,7 @@ public class SingleNodePlanner {
 
     private final PlannerContext ctx_;
     private final ArrayList<ScanNode> scanNodes = Lists.newArrayList();
-    private Map<UUID, List<ScanNode>> selectStmtToScanNodes = Maps.newHashMap();
+    private Map<Analyzer, List<ScanNode>> selectStmtToScanNodes = Maps.newHashMap();
 
     public SingleNodePlanner(PlannerContext ctx) {
         ctx_ = ctx;
@@ -778,7 +777,7 @@ public class SingleNodePlanner {
                             ((InlineViewRef) tableRef).getAnalyzer());
                 }
             }
-            List<ScanNode> scanNodeList = selectStmtToScanNodes.get(selectStmt.getId());
+            List<ScanNode> scanNodeList = selectStmtToScanNodes.get(selectStmt.getAnalyzer());
             if (scanNodeList == null) {
                 return selectFailed;
             }
@@ -908,7 +907,7 @@ public class SingleNodePlanner {
     }
 
     // no need to remove?
-    private PartitionColumnFilter createPartitionFilter(SlotDescriptor desc, List<Expr> conjuncts) {
+    public static PartitionColumnFilter createPartitionFilter(SlotDescriptor desc, List<Expr> conjuncts) {
         PartitionColumnFilter partitionColumnFilter = null;
         for (Expr expr : conjuncts) {
             if (!expr.isBound(desc.getId())) {
@@ -940,11 +939,15 @@ public class SingleNodePlanner {
                         break;
                     case LE:
                         partitionColumnFilter.setUpperBound(literal, true);
-                        partitionColumnFilter.lowerBoundInclusive = true;
+                        if (null == partitionColumnFilter.lowerBound) {
+                            partitionColumnFilter.lowerBoundInclusive = true;
+                        }
                         break;
                     case LT:
                         partitionColumnFilter.setUpperBound(literal, false);
-                        partitionColumnFilter.lowerBoundInclusive = true;
+                        if (null == partitionColumnFilter.lowerBound) {
+                            partitionColumnFilter.lowerBoundInclusive = true;
+                        }
                         break;
                     case GE:
                         partitionColumnFilter.setLowerBound(literal, true);
@@ -1455,7 +1458,7 @@ public class SingleNodePlanner {
         analyzer.materializeSlots(scanNode.getConjuncts());
 
         scanNodes.add(scanNode);
-        List<ScanNode> scanNodeList = selectStmtToScanNodes.computeIfAbsent(selectStmt.getId(), k -> Lists.newArrayList());
+        List<ScanNode> scanNodeList = selectStmtToScanNodes.computeIfAbsent(selectStmt.getAnalyzer(), k -> Lists.newArrayList());
         scanNodeList.add(scanNode);
         return scanNode;
     }
@@ -1890,13 +1893,14 @@ public class SingleNodePlanner {
 
     /**
      * When materialized table ref is a empty tbl ref, the planner should add a mini column for this tuple.
-     * There are two situation:
+     * There are situations:
      * 1. The tbl ref is empty, such as select a from (select 'c1' a from test) t;
      * Inner tuple: tuple 0 without slot
      * 2. The materialized slot in tbl ref is empty, such as select a from (select 'c1' a, k1 from test) t;
      * Inner tuple: tuple 0 with a not materialized slot k1
      * In the above two cases, it is necessary to add a mini column to the inner tuple
      * to ensure that the number of rows in the inner query result is the number of rows in the table.
+     * 2. count star: select count(*) from t;
      * <p>
      * After this function, the inner tuple is following:
      * case1. tuple 0: slot<k1> materialized true (new slot)
@@ -1928,7 +1932,13 @@ public class SingleNodePlanner {
     }
 
     /**
-     * materialize InlineViewRef result'exprs for Cross Join or Count Star
+     * Materialize InlineViewRef result'exprs for Cross Join or Count Star
+     * For example: select count(*) from (select k1+1 ,k2 ,k3 from base) tmp
+     * Columns: k1 tinyint, k2 bigint, k3 double
+     * Input: tmp, analyzer
+     * Output:
+     *   Materialized slot: k1 true, k2 false, k3 false
+     *   Materialized tuple: base
      *
      * @param inlineView
      * @param analyzer
@@ -1951,7 +1961,7 @@ public class SingleNodePlanner {
                 if (!slot.isMaterialized()) {
                     exprIsMaterialized = false;
                 }
-                exprSize += slot.getByteSize();
+                exprSize += slot.getType().getSlotSize();
             }
 
             // Result Expr contains materialized expr, return
@@ -1959,7 +1969,7 @@ public class SingleNodePlanner {
                 return;
             }
 
-            if (exprSize <= resultExprSelectedSize) {
+            if (resultExprSelected == null || exprSize < resultExprSelectedSize) {
                 resultExprSelectedSize = exprSize;
                 resultExprSelected = e;
             }

@@ -149,7 +149,7 @@ under the License.
             1) 聚合模型如果修改 value 列，需要指定 agg_type
             2) 非聚合类型如果修改key列，需要指定KEY关键字
             3) 只能修改列的类型，列的其他属性维持原样（即其他属性需在语句中按照原属性显式的写出，参见 example 8）
-            4) 分区列不能做任何修改
+            4) 分区列和分桶列不能做任何修改
             5) 目前支持以下类型的转换（精度损失由用户保证）
                 TINYINT/SMALLINT/INT/BIGINT/LARGEINT/FLOAT/DOUBLE 类型向范围更大的数字类型转换
                 TINTINT/SMALLINT/INT/BIGINT/LARGEINT/FLOAT/DOUBLE/DECIMAL 转换成 VARCHAR
@@ -220,7 +220,7 @@ under the License.
 
     [table]
     1. 修改表的默认副本数量, 新建分区副本数量默认使用此值
-        ATLER TABLE example_db.my_table 
+        ALTER TABLE example_db.my_table 
         SET ("default.replication_num" = "2");
         
     2. 修改单分区表的实际副本数量(只限单分区表)
@@ -266,8 +266,7 @@ under the License.
     [rollup]
     1. 创建 index: example_rollup_index，基于 base index（k1,k2,k3,v1,v2）。列式存储。
         ALTER TABLE example_db.my_table
-        ADD ROLLUP example_rollup_index(k1, k3, v1, v2)
-        PROPERTIES("storage_type"="column");
+        ADD ROLLUP example_rollup_index(k1, k3, v1, v2);
         
     2. 创建 index: example_rollup_index2，基于 example_rollup_index（k1,k3,v1,v2）
         ALTER TABLE example_db.my_table
@@ -277,7 +276,7 @@ under the License.
     3. 创建 index: example_rollup_index3, 基于 base index (k1,k2,k3,v1), 自定义 rollup 超时时间一小时。
         ALTER TABLE example_db.my_table
         ADD ROLLUP example_rollup_index(k1, k3, v1)
-        PROPERTIES("storage_type"="column", "timeout" = "3600");
+        PROPERTIES("timeout" = "3600");
 
     4. 删除 index: example_rollup_index2
         ALTER TABLE example_db.my_table
@@ -316,9 +315,10 @@ under the License.
         DROP COLUMN col2
         FROM example_rollup_index;
         
-    7. 修改 base index 的 col1 列的类型为 BIGINT，并移动到 col2 列后面
+    7. 修改 base index 的 key 列 col1 的类型为 BIGINT，并移动到 col2 列后面
+       (*注意，无论是修改 key 列还是 value 列都需要声明完整的 column 信息*) 例如：MODIFY COLUMN xxx COLUMNTYPE [KEY|agg_type] 
         ALTER TABLE example_db.my_table
-        MODIFY COLUMN col1 BIGINT DEFAULT "1" AFTER col2;
+        MODIFY COLUMN col1 BIGINT KEY DEFAULT "1" AFTER col2;
 
     8. 修改 base index 的 val1 列最大长度。原 val1 为 (val1 VARCHAR(32) REPLACE DEFAULT "abc")
         ALTER TABLE example_db.my_table

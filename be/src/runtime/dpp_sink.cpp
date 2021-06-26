@@ -23,6 +23,7 @@
 #include "agent/cgroups_mgr.h"
 #include "common/object_pool.h"
 #include "exprs/expr.h"
+#include "exprs/expr_context.h"
 #include "exprs/slot_ref.h"
 #include "gen_cpp/Types_types.h"
 #include "olap/field.h"
@@ -665,7 +666,7 @@ void HllDppSinkMerge::update_hll_set(TupleRow* agg_row, TupleRow* row, ExprConte
         if (value->hash_set.size() > HLL_EXPLICIT_INT64_NUM) {
             value->type = HLL_DATA_SPARSE;
             for (std::set<uint64_t>::iterator iter = value->hash_set.begin();
-                 iter != value->hash_set.end(); iter++) {
+                 iter != value->hash_set.end(); ++iter) {
                 uint64_t hash = *iter;
                 int idx = hash % REGISTERS_SIZE;
                 uint8_t first_one_bit = __builtin_ctzl(hash >> HLL_COLUMN_PRECISION) + 1;
@@ -911,7 +912,7 @@ Status DppSink::finish(RuntimeState* state) {
     for (auto& iter : _translator_map) {
         for (auto& trans : iter.second) {
             state->exec_env()->etl_thread_pool()->offer(
-                    boost::bind<void>(&DppSink::process, this, state, trans, &latch));
+                    std::bind<void>(&DppSink::process, this, state, trans, &latch));
         }
     }
 

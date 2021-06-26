@@ -36,12 +36,13 @@ MysqlScanNode::MysqlScanNode(ObjectPool* pool, const TPlanNode& tnode, const Des
           _tuple_id(tnode.mysql_scan_node.tuple_id),
           _columns(tnode.mysql_scan_node.columns),
           _filters(tnode.mysql_scan_node.filters),
-          _tuple_desc(nullptr) {}
+          _tuple_desc(nullptr),
+          _slot_num(0) {}
 
 MysqlScanNode::~MysqlScanNode() {}
 
 Status MysqlScanNode::prepare(RuntimeState* state) {
-    VLOG(1) << "MysqlScanNode::Prepare";
+    VLOG_CRITICAL << "MysqlScanNode::Prepare";
 
     if (_is_init) {
         return Status::OK();
@@ -99,7 +100,7 @@ Status MysqlScanNode::prepare(RuntimeState* state) {
 
 Status MysqlScanNode::open(RuntimeState* state) {
     RETURN_IF_ERROR(ExecNode::open(state));
-    VLOG(1) << "MysqlScanNode::Open";
+    VLOG_CRITICAL << "MysqlScanNode::Open";
 
     if (NULL == state) {
         return Status::InternalError("input pointer is NULL.");
@@ -136,7 +137,8 @@ Status MysqlScanNode::write_text_slot(char* value, int value_length, SlotDescrip
     if (!_text_converter->write_slot(slot, _tuple, value, value_length, true, false,
                                      _tuple_pool.get())) {
         std::stringstream ss;
-        ss << "fail to convert mysql value '" << value << "' TO " << slot->type();
+        ss << "Fail to convert mysql value:'" << value << "' to " << slot->type() << " on column:`"
+           << slot->col_name() + "`";
         return Status::InternalError(ss.str());
     }
 
@@ -144,7 +146,7 @@ Status MysqlScanNode::write_text_slot(char* value, int value_length, SlotDescrip
 }
 
 Status MysqlScanNode::get_next(RuntimeState* state, RowBatch* row_batch, bool* eos) {
-    VLOG(1) << "MysqlScanNode::GetNext";
+    VLOG_CRITICAL << "MysqlScanNode::GetNext";
 
     if (NULL == state || NULL == row_batch || NULL == eos) {
         return Status::InternalError("input is NULL pointer");

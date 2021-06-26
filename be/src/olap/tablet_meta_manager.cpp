@@ -101,14 +101,8 @@ OLAPStatus TabletMetaManager::save(DataDir* store, TTabletId tablet_id, TSchemaH
     std::stringstream key_stream;
     key_stream << header_prefix << tablet_id << "_" << schema_hash;
     std::string key = key_stream.str();
-    VLOG(3) << "save tablet meta to meta store: key = " << key;
+    VLOG_NOTICE << "save tablet meta to meta store: key = " << key;
     OlapMeta* meta = store->get_meta();
-
-    TabletMetaPB de_tablet_meta_pb;
-    bool parsed = de_tablet_meta_pb.ParseFromString(meta_binary);
-    if (!parsed) {
-        LOG(FATAL) << "deserialize from previous serialize result failed";
-    }
 
     LOG(INFO) << "save tablet meta "
               << ", key:" << key << " meta_size=" << meta_binary.length();

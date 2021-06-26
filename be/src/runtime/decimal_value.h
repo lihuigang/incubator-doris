@@ -25,6 +25,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <string_view>
 
 #include "common/logging.h"
 #include "gutil/strings/numbers.h"
@@ -104,7 +105,11 @@ public:
     DecimalValue() : _buffer_length(DECIMAL_BUFF_LENGTH) { set_to_zero(); }
 
     DecimalValue(const std::string& decimal_str) : _buffer_length(DECIMAL_BUFF_LENGTH) {
-        parse_from_str(decimal_str.c_str(), decimal_str.size());
+        parse_from_str(decimal_str.data(), decimal_str.size());
+    }
+
+    DecimalValue(const std::string_view& decimal_str) : _buffer_length(DECIMAL_BUFF_LENGTH) {
+        parse_from_str(decimal_str.data(), decimal_str.size());
     }
 
     // Construct from olap engine
@@ -316,6 +321,10 @@ public:
         return value;
     }
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Warray-bounds"
+#pragma GCC diagnostic ignored "-Wstringop-overflow="
+
     static DecimalValue from_decimal_val(const doris_udf::DecimalVal& val) {
         DecimalValue result;
         result._int_length = val.int_len;
@@ -326,6 +335,7 @@ public:
         memcpy(result._buffer, val.buffer, sizeof(int32_t) * DECIMAL_BUFF_LENGTH);
         return result;
     }
+#pragma GCC diagnostic pop
 
     void to_decimal_val(doris_udf::DecimalVal* value) const {
         value->int_len = _int_length;

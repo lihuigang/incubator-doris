@@ -17,7 +17,7 @@
 
 #include "runtime/etl_job_mgr.h"
 
-#include <boost/filesystem.hpp>
+#include <filesystem>
 #include <functional>
 
 #include "gen_cpp/FrontendService.h"
@@ -37,7 +37,7 @@
 
 namespace doris {
 
-#define VLOG_ETL VLOG(2)
+#define VLOG_ETL VLOG_CRITICAL
 
 std::string EtlJobMgr::to_http_path(const std::string& file_name) {
     std::stringstream url;
@@ -155,7 +155,7 @@ void EtlJobMgr::finalize_job(PlanFragmentExecutor* executor) {
     if (executor->status().ok()) {
         // Get files
         for (auto& it : state->output_files()) {
-            int64_t file_size = boost::filesystem::file_size(it);
+            int64_t file_size = std::filesystem::file_size(it);
             result.file_map[to_http_path(it)] = file_size;
         }
         // set statistics

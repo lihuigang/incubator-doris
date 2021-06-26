@@ -17,7 +17,6 @@
 
 #include "runtime/raw_value.h"
 
-#include <boost/functional/hash.hpp>
 #include <sstream>
 
 #include "olap/utils.h"
@@ -163,11 +162,11 @@ void RawValue::print_value(const void* value, const TypeDescriptor& type, int sc
         break;
 
     case TYPE_DECIMAL:
-        *stream << *reinterpret_cast<const DecimalValue*>(value);
+        *stream << reinterpret_cast<const DecimalValue*>(value)->to_string();
         break;
 
     case TYPE_DECIMALV2:
-        *stream << reinterpret_cast<const PackedInt128*>(value)->value;
+        *stream << DecimalV2Value(reinterpret_cast<const PackedInt128*>(value)->value).to_string();
         break;
 
     case TYPE_LARGEINT:

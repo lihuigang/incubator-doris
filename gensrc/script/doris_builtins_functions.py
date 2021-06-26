@@ -150,6 +150,14 @@ visible_functions = [
     [['weekofyear'], 'INT', ['DATETIME'],
         '_ZN5doris18TimestampFunctions12week_of_yearEPN9doris_udf'
         '15FunctionContextERKNS1_11DateTimeValE'],
+    [['yearweek'], 'INT', ['DATETIME'],
+        '_ZN5doris18TimestampFunctions9year_weekEPN9doris_udf15FunctionContextERKNS1_11DateTimeValE'],
+    [['yearweek'], 'INT', ['DATETIME', 'INT'],
+        '_ZN5doris18TimestampFunctions9year_weekEPN9doris_udf15FunctionContextERKNS1_11DateTimeValERKNS1_6IntValE'],
+    [['week'], 'INT', ['DATETIME'],
+        '_ZN5doris18TimestampFunctions4weekEPN9doris_udf15FunctionContextERKNS1_11DateTimeValE'],
+    [['week'], 'INT', ['DATETIME', 'INT'],
+        '_ZN5doris18TimestampFunctions4weekEPN9doris_udf15FunctionContextERKNS1_11DateTimeValERKNS1_6IntValE'],
     [['hour'], 'INT', ['DATETIME'],
         '_ZN5doris18TimestampFunctions4hourEPN9doris_udf15FunctionContextERKNS1_11DateTimeValE'],
     [['minute'], 'INT', ['DATETIME'],
@@ -157,6 +165,8 @@ visible_functions = [
     [['second'], 'INT', ['DATETIME'],
         '_ZN5doris18TimestampFunctions6secondEPN9doris_udf15FunctionContextERKNS1_11DateTimeValE'],
 
+    [['makedate'], 'DATETIME', ['INT', 'INT'],
+        '_ZN5doris18TimestampFunctions9make_dateEPN9doris_udf15FunctionContextERKNS1_6IntValES6_'],
     [['years_add'], 'DATETIME', ['DATETIME', 'INT'],
         '_ZN5doris18TimestampFunctions9years_addEPN9doris_udf'
         '15FunctionContextERKNS1_11DateTimeValERKNS1_6IntValE'],
@@ -802,6 +812,8 @@ visible_functions = [
         '_ZN5doris15BitmapFunctions9bitmap_orEPN9doris_udf15FunctionContextERKNS1_9StringValES6_'],
     [['bitmap_xor'], 'BITMAP', ['BITMAP','BITMAP'],
         '_ZN5doris15BitmapFunctions10bitmap_xorEPN9doris_udf15FunctionContextERKNS1_9StringValES6_'],
+    [['bitmap_not'], 'BITMAP', ['BITMAP','BITMAP'],
+        '_ZN5doris15BitmapFunctions10bitmap_notEPN9doris_udf15FunctionContextERKNS1_9StringValES6_'],
     [['bitmap_and'], 'BITMAP', ['BITMAP','BITMAP'],
         '_ZN5doris15BitmapFunctions10bitmap_andEPN9doris_udf15FunctionContextERKNS1_9StringValES6_'],
     [['bitmap_to_string'], 'VARCHAR', ['BITMAP'],
@@ -812,6 +824,8 @@ visible_functions = [
         '_ZN5doris15BitmapFunctions15bitmap_containsEPN9doris_udf15FunctionContextERKNS1_9StringValERKNS1_9BigIntValE'],
     [['bitmap_has_any'], 'BOOLEAN', ['BITMAP','BITMAP'],
         '_ZN5doris15BitmapFunctions14bitmap_has_anyEPN9doris_udf15FunctionContextERKNS1_9StringValES6_'],
+    [['bitmap_min'], 'BIGINT', ['BITMAP'],
+        '_ZN5doris15BitmapFunctions10bitmap_minEPN9doris_udf15FunctionContextERKNS1_9StringValE'],
 
     # hash functions
     [['murmur_hash3_32'], 'INT', ['VARCHAR', '...'],
@@ -891,6 +905,7 @@ non_null_result_with_null_param_functions = [
     'hll_hash',
     'concat_ws',
     'ifnull',
+    'nullif',
     'null_or_empty',
     'coalesce'
 ]

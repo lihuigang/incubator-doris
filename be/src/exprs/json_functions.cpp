@@ -28,6 +28,7 @@
 #include <boost/tokenizer.hpp>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "common/logging.h"
@@ -51,8 +52,8 @@ IntVal JsonFunctions::get_json_int(FunctionContext* context, const StringVal& js
     if (json_str.is_null || path.is_null) {
         return IntVal::null();
     }
-    std::string json_string((char*)json_str.ptr, json_str.len);
-    std::string path_string((char*)path.ptr, path.len);
+    std::string_view json_string((char*)json_str.ptr, json_str.len);
+    std::string_view path_string((char*)path.ptr, path.len);
     rapidjson::Document document;
     rapidjson::Value* root =
             get_json_object(context, json_string, path_string, JSON_FUN_INT, &document);
@@ -69,8 +70,8 @@ StringVal JsonFunctions::get_json_string(FunctionContext* context, const StringV
         return StringVal::null();
     }
 
-    std::string json_string((char*)json_str.ptr, json_str.len);
-    std::string path_string((char*)path.ptr, path.len);
+    std::string_view json_string((char*)json_str.ptr, json_str.len);
+    std::string_view path_string((char*)path.ptr, path.len);
     rapidjson::Document document;
     rapidjson::Value* root =
             get_json_object(context, json_string, path_string, JSON_FUN_STRING, &document);
@@ -91,8 +92,8 @@ DoubleVal JsonFunctions::get_json_double(FunctionContext* context, const StringV
     if (json_str.is_null || path.is_null) {
         return DoubleVal::null();
     }
-    std::string json_string((char*)json_str.ptr, json_str.len);
-    std::string path_string((char*)path.ptr, path.len);
+    std::string_view json_string((char*)json_str.ptr, json_str.len);
+    std::string_view path_string((char*)path.ptr, path.len);
     rapidjson::Document document;
     rapidjson::Value* root =
             get_json_object(context, json_string, path_string, JSON_FUN_DOUBLE, &document);
@@ -114,7 +115,7 @@ rapidjson::Value* JsonFunctions::match_value(const std::vector<JsonPath>& parsed
     rapidjson::Value* root = document;
     rapidjson::Value* array_obj = nullptr;
     for (int i = 1; i < parsed_paths.size(); i++) {
-        VLOG(10) << "parsed_paths: " << parsed_paths[i].debug_string();
+        VLOG_TRACE << "parsed_paths: " << parsed_paths[i].debug_string();
 
         if (root == nullptr || root->IsNull()) {
             return nullptr;
@@ -209,8 +210,8 @@ rapidjson::Value* JsonFunctions::match_value(const std::vector<JsonPath>& parsed
 }
 
 rapidjson::Value* JsonFunctions::get_json_object(FunctionContext* context,
-                                                 const std::string& json_string,
-                                                 const std::string& path_string,
+                                                 const std::string_view& json_string,
+                                                 const std::string_view& path_string,
                                                  const JsonFunctionType& fntype,
                                                  rapidjson::Document* document) {
     // split path by ".", and escape quota by "\"
@@ -224,6 +225,8 @@ rapidjson::Value* JsonFunctions::get_json_object(FunctionContext* context,
     parsed_paths = reinterpret_cast<std::vector<JsonPath>*>(
             context->get_function_state(FunctionContext::FRAGMENT_LOCAL));
     if (parsed_paths == nullptr) {
+        // TODO: use std::string_view instead of std::string
+        // avoid use boost::tokenizer
         boost::tokenizer<boost::escaped_list_separator<char>> tok(
                 path_string, boost::escaped_list_separator<char>("\\", ".", "\""));
         std::vector<std::string> paths(tok.begin(), tok.end());
@@ -238,7 +241,7 @@ rapidjson::Value* JsonFunctions::get_json_object(FunctionContext* context,
     parsed_paths = &tmp_parsed_paths;
 #endif
 
-    VLOG(10) << "first parsed path: " << (*parsed_paths)[0].debug_string();
+    VLOG_TRACE << "first parsed path: " << (*parsed_paths)[0].debug_string();
 
     if (!(*parsed_paths)[0].is_valid) {
         return document;
@@ -246,17 +249,17 @@ rapidjson::Value* JsonFunctions::get_json_object(FunctionContext* context,
 
     if (UNLIKELY((*parsed_paths).size() == 1)) {
         if (fntype == JSON_FUN_STRING) {
-            document->SetString(json_string.c_str(), document->GetAllocator());
+            document->SetString(json_string.data(), json_string.length(), document->GetAllocator());
         } else {
             return document;
         }
     }
 
     //rapidjson::Document document;
-    document->Parse(json_string.c_str());
+    document->Parse(json_string.data(), json_string.length());
     if (UNLIKELY(document->HasParseError())) {
-        VLOG(1) << "Error at offset " << document->GetErrorOffset() << ": "
-                << GetParseError_En(document->GetParseError());
+        VLOG_CRITICAL << "Error at offset " << document->GetErrorOffset() << ": "
+                      << GetParseError_En(document->GetParseError());
         document->SetNull();
         return document;
     }
@@ -327,7 +330,7 @@ void JsonFunctions::json_path_prepare(doris_udf::FunctionContext* context,
     get_parsed_paths(path_exprs, parsed_paths);
 
     context->set_function_state(scope, parsed_paths);
-    VLOG(10) << "prepare json path. size: " << parsed_paths->size();
+    VLOG_TRACE << "prepare json path. size: " << parsed_paths->size();
 }
 
 void JsonFunctions::json_path_close(doris_udf::FunctionContext* context,
@@ -339,7 +342,7 @@ void JsonFunctions::json_path_close(doris_udf::FunctionContext* context,
             reinterpret_cast<std::vector<JsonPath>*>(context->get_function_state(scope));
     if (parsed_paths != nullptr) {
         delete parsed_paths;
-        VLOG(10) << "close json path";
+        VLOG_TRACE << "close json path";
     }
 }
 
@@ -382,7 +385,7 @@ void JsonFunctions::get_parsed_paths(const std::vector<std::string>& path_exprs,
                     idx = atoi(index.c_str());
                 }
             }
-            parsed_paths->emplace_back(col, idx, true);
+            parsed_paths->emplace_back(std::move(col), idx, true);
         }
     }
 }

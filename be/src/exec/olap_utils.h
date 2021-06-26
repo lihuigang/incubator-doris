@@ -190,9 +190,9 @@ inline int get_olap_size(PrimitiveType type) {
 inline SQLFilterOp to_olap_filter_type(TExprOpcode::type type, bool opposite) {
     switch (type) {
     case TExprOpcode::LT:
+        return opposite ? FILTER_LARGER : FILTER_LESS;
+
     case TExprOpcode::LE:
-        // NOTE: Datetime may be truncated to a date column, so we convert LT to LE
-        //  for example: '2010-01-01 00:00:01' will be truncate to '2010-01-01'
         return opposite ? FILTER_LARGER_OR_EQUAL : FILTER_LESS_OR_EQUAL;
 
     case TExprOpcode::GT:
@@ -207,8 +207,11 @@ inline SQLFilterOp to_olap_filter_type(TExprOpcode::type type, bool opposite) {
     case TExprOpcode::NE:
         return opposite ? FILTER_IN : FILTER_NOT_IN;
 
+    case TExprOpcode::EQ_FOR_NULL:
+        return FILTER_IN;
+
     default:
-        VLOG(1) << "TExprOpcode: " << type;
+        VLOG_CRITICAL << "TExprOpcode: " << type;
         DCHECK(false);
     }
 

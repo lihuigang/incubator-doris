@@ -165,6 +165,8 @@ enum OLAPStatus {
     OLAP_ERR_TOO_MANY_TRANSACTIONS = -233,
     OLAP_ERR_INVALID_SNAPSHOT_VERSION = -234,
     OLAP_ERR_TOO_MANY_VERSION = -235,
+    OLAP_ERR_NOT_INITIALIZED = -236,
+    OLAP_ERR_ALREADY_CANCELLED = -237,
 
     // CommandExecutor
     // [-300, -400)
@@ -194,6 +196,7 @@ enum OLAPStatus {
     OLAP_ERR_TABLE_INSERT_DUPLICATION_ERROR = -503,
     OLAP_ERR_DELETE_VERSION_ERROR = -504,
     OLAP_ERR_GC_SCAN_PATH_ERROR = -505,
+    OLAP_ERR_ENGINE_INSERT_OLD_TABLET = -506,
 
     // FetchHandler
     // [-600, -700)
@@ -388,6 +391,7 @@ static const std::string CONVERTED_FLAG = "true";
 static const std::string TABLET_CONVERT_FINISHED = "tablet_convert_finished";
 const std::string TABLET_ID_KEY = "tablet_id";
 const std::string TABLET_SCHEMA_HASH_KEY = "schema_hash";
+const std::string ENABLE_BYTE_TO_BASE64 = "byte_to_base64";
 const std::string TABLET_ID_PREFIX = "t_";
 const std::string ROWSET_ID_PREFIX = "s_";
 

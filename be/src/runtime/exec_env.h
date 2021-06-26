@@ -140,6 +140,9 @@ public:
 
     PluginMgr* plugin_mgr() { return _plugin_mgr; }
 
+    // The root tracker should be set before calling ExecEnv::init();
+    void set_root_mem_tracker(std::shared_ptr<MemTracker> root_tracker);
+
 private:
     Status _init(const std::vector<StorePath>& store_paths);
     void _destroy();
@@ -147,6 +150,9 @@ private:
     Status _init_mem_tracker();
     /// Initialise 'buffer_pool_' and 'buffer_reservation_' with given capacity.
     void _init_buffer_pool(int64_t min_page_len, int64_t capacity, int64_t clean_pages_limit);
+
+    void _register_metrics();
+    void _deregister_metrics();
 
 private:
     bool _is_init;

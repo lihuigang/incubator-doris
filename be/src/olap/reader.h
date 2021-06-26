@@ -76,7 +76,7 @@ struct ReaderParams {
 
     void check_validation() const;
 
-    std::string to_string();
+    std::string to_string() const;
 };
 
 class Reader {
@@ -101,7 +101,7 @@ public:
     uint64_t merged_rows() const { return _merged_rows; }
 
     uint64_t filtered_rows() const {
-        return _stats.rows_del_filtered + _stats.rows_conditions_filtered;
+        return _stats.rows_del_filtered + _stats.rows_conditions_filtered + _stats.rows_vec_del_cond_filtered;
     }
 
     const OlapReaderStatistics& stats() const { return _stats; }
@@ -120,23 +120,26 @@ private:
     };
 
     friend class CollectIterator;
+    friend class DeleteHandler;
 
     OLAPStatus _init_params(const ReaderParams& read_params);
 
-    OLAPStatus _capture_rs_readers(const ReaderParams& read_params);
+    OLAPStatus _capture_rs_readers(const ReaderParams& read_params, std::vector<RowsetReaderSharedPtr>* valid_rs_readers);
+
+    bool _optimize_for_single_rowset(const std::vector<RowsetReaderSharedPtr>& rs_readers);
 
     OLAPStatus _init_keys_param(const ReaderParams& read_params);
 
     void _init_conditions_param(const ReaderParams& read_params);
 
-    ColumnPredicate* _new_eq_pred(const TabletColumn& column, int index, const std::string& cond);
-    ColumnPredicate* _new_ne_pred(const TabletColumn& column, int index, const std::string& cond);
-    ColumnPredicate* _new_lt_pred(const TabletColumn& column, int index, const std::string& cond);
-    ColumnPredicate* _new_le_pred(const TabletColumn& column, int index, const std::string& cond);
-    ColumnPredicate* _new_gt_pred(const TabletColumn& column, int index, const std::string& cond);
-    ColumnPredicate* _new_ge_pred(const TabletColumn& column, int index, const std::string& cond);
+    ColumnPredicate* _new_eq_pred(const TabletColumn& column, int index, const std::string& cond, bool opposite) const;
+    ColumnPredicate* _new_ne_pred(const TabletColumn& column, int index, const std::string& cond, bool opposite) const;
+    ColumnPredicate* _new_lt_pred(const TabletColumn& column, int index, const std::string& cond, bool opposite) const;
+    ColumnPredicate* _new_le_pred(const TabletColumn& column, int index, const std::string& cond, bool opposite) const;
+    ColumnPredicate* _new_gt_pred(const TabletColumn& column, int index, const std::string& cond, bool opposite) const;
+    ColumnPredicate* _new_ge_pred(const TabletColumn& column, int index, const std::string& cond, bool opposite) const;
 
-    ColumnPredicate* _parse_to_predicate(const TCondition& condition);
+    ColumnPredicate* _parse_to_predicate(const TCondition& condition, bool opposite = false) const;
 
     OLAPStatus _init_delete_condition(const ReaderParams& read_params);
 
@@ -145,10 +148,21 @@ private:
 
     void _init_load_bf_columns(const ReaderParams& read_params);
 
-    OLAPStatus _dup_key_next_row(RowCursor* row_cursor, MemPool* mem_pool, ObjectPool* agg_pool,
-                                 bool* eof);
+    // Direcly read row from rowset and pass to upper caller. No need to do aggregation.
+    // This is usually used for DUPLICATE KEY tables
+    OLAPStatus _direct_next_row(RowCursor* row_cursor, MemPool* mem_pool, ObjectPool* agg_pool,
+                                bool* eof);
+    // Just same as _direct_next_row, but this is only for AGGREGATE KEY tables.
+    // And this is an optimization for AGGR tables.
+    // When there is only one rowset and is not overlapping, we can read it directly without aggregation.
+    OLAPStatus _direct_agg_key_next_row(RowCursor* row_cursor, MemPool* mem_pool,
+                                        ObjectPool* agg_pool, bool* eof);
+    // For normal AGGREGATE KEY tables, read data by a merge heap.
     OLAPStatus _agg_key_next_row(RowCursor* row_cursor, MemPool* mem_pool, ObjectPool* agg_pool,
                                  bool* eof);
+    // For UNIQUE KEY tables, read data by a merge heap.
+    // The difference from _agg_key_next_row is that it will read the data from high version to low version,
+    // to minimize the comparison time in merge heap.
     OLAPStatus _unique_key_next_row(RowCursor* row_cursor, MemPool* mem_pool, ObjectPool* agg_pool,
                                     bool* eof);
 
@@ -162,13 +176,13 @@ private:
     std::vector<uint32_t> _seek_columns;
 
     TabletSharedPtr _tablet;
-    std::vector<RowsetReaderSharedPtr> _rs_readers;
     RowsetReaderContext _reader_context;
     KeysParam _keys_param;
     std::vector<bool> _is_lower_keys_included;
     std::vector<bool> _is_upper_keys_included;
     Conditions _conditions;
     std::vector<ColumnPredicate*> _col_predicates;
+    std::vector<ColumnPredicate*> _value_col_predicates;
     DeleteHandler _delete_handler;
 
     OLAPStatus (Reader::*_next_row_func)(RowCursor* row_cursor, MemPool* mem_pool,
@@ -183,7 +197,7 @@ private:
     bool _has_sequence_col = false;
     int32_t _sequence_col_idx = -1;
     const RowCursor* _next_key = nullptr;
-    CollectIterator* _collect_iter = nullptr;
+    std::unique_ptr<CollectIterator> _collect_iter;
     std::vector<uint32_t> _key_cids;
     std::vector<uint32_t> _value_cids;
 

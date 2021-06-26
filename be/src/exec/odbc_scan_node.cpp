@@ -36,12 +36,13 @@ OdbcScanNode::OdbcScanNode(ObjectPool* pool, const TPlanNode& tnode, const Descr
           _connect_string(std::move(tnode.odbc_scan_node.connect_string)),
           _query_string(std::move(tnode.odbc_scan_node.query_string)),
           _tuple_id(tnode.odbc_scan_node.tuple_id),
-          _tuple_desc(nullptr) {}
+          _tuple_desc(nullptr),
+          _slot_num(0) {}
 
 OdbcScanNode::~OdbcScanNode() {}
 
 Status OdbcScanNode::prepare(RuntimeState* state) {
-    VLOG(1) << "OdbcScanNode::Prepare";
+    VLOG_CRITICAL << "OdbcScanNode::Prepare";
 
     if (_is_init) {
         return Status::OK();
@@ -65,7 +66,7 @@ Status OdbcScanNode::prepare(RuntimeState* state) {
     _odbc_param.query_string = std::move(_query_string);
     _odbc_param.tuple_desc = _tuple_desc;
 
-    _odbc_scanner.reset(new (std::nothrow) ODBCScanner(_odbc_param));
+    _odbc_scanner.reset(new (std::nothrow) ODBCConnector(_odbc_param));
 
     if (_odbc_scanner.get() == nullptr) {
         return Status::InternalError("new a odbc scanner failed.");
@@ -90,7 +91,7 @@ Status OdbcScanNode::prepare(RuntimeState* state) {
 
 Status OdbcScanNode::open(RuntimeState* state) {
     RETURN_IF_ERROR(ExecNode::open(state));
-    VLOG(1) << "OdbcScanNode::Open";
+    VLOG_CRITICAL << "OdbcScanNode::Open";
 
     if (NULL == state) {
         return Status::InternalError("input pointer is NULL.");
@@ -115,7 +116,8 @@ Status OdbcScanNode::write_text_slot(char* value, int value_length, SlotDescript
     if (!_text_converter->write_slot(slot, _tuple, value, value_length, true, false,
                                      _tuple_pool.get())) {
         std::stringstream ss;
-        ss << "fail to convert odbc value '" << value << "' TO " << slot->type();
+        ss << "Fail to convert odbc value:'" << value << "' to " << slot->type() << " on column:`"
+           << slot->col_name() + "`";
         return Status::InternalError(ss.str());
     }
 
@@ -123,7 +125,7 @@ Status OdbcScanNode::write_text_slot(char* value, int value_length, SlotDescript
 }
 
 Status OdbcScanNode::get_next(RuntimeState* state, RowBatch* row_batch, bool* eos) {
-    VLOG(1) << "OdbcScanNode::GetNext";
+    VLOG_CRITICAL << "OdbcScanNode::GetNext";
 
     if (NULL == state || NULL == row_batch || NULL == eos) {
         return Status::InternalError("input is NULL pointer");

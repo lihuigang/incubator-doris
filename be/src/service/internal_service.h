@@ -70,11 +70,6 @@ public:
                               PTabletWriterCancelResult* response,
                               google::protobuf::Closure* done) override;
 
-    void trigger_profile_report(google::protobuf::RpcController* controller,
-                                const PTriggerProfileReportRequest* request,
-                                PTriggerProfileReportResult* result,
-                                google::protobuf::Closure* done) override;
-
     void get_info(google::protobuf::RpcController* controller, const PProxyRequest* request,
                   PProxyResult* response, google::protobuf::Closure* done) override;
 
@@ -89,7 +84,7 @@ public:
                      PCacheResponse* response, google::protobuf::Closure* done) override;
 
 private:
-    Status _exec_plan_fragment(brpc::Controller* cntl);
+    Status _exec_plan_fragment(const std::string& s_request);
 
 private:
     ExecEnv* _exec_env;

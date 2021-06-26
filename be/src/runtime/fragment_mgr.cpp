@@ -20,7 +20,6 @@
 #include <gperftools/profiler.h>
 #include <thrift/protocol/TDebugProtocol.h>
 
-#include <boost/bind.hpp>
 #include <memory>
 #include <sstream>
 
@@ -167,11 +166,12 @@ FragmentExecState::FragmentExecState(const TUniqueId& query_id,
           _fragment_instance_id(fragment_instance_id),
           _backend_num(backend_num),
           _exec_env(exec_env),
-          _executor(exec_env,
-                    boost::bind<void>(boost::mem_fn(&FragmentExecState::coordinator_callback), this,
-                                      _1, _2, _3)),
+          _executor(exec_env, std::bind<void>(std::mem_fn(&FragmentExecState::coordinator_callback),
+                                              this, std::placeholders::_1, std::placeholders::_2,
+                                              std::placeholders::_3)),
           _timeout_second(-1),
-          _fragments_ctx(fragments_ctx) {
+          _fragments_ctx(std::move(fragments_ctx)),
+          _set_rsc_info(false) {
     _start_time = DateTimeValue::local_time();
     _coord_addr = _fragments_ctx->coord_addr;
 }
@@ -184,9 +184,9 @@ FragmentExecState::FragmentExecState(const TUniqueId& query_id,
           _backend_num(backend_num),
           _exec_env(exec_env),
           _coord_addr(coord_addr),
-          _executor(exec_env,
-                    boost::bind<void>(boost::mem_fn(&FragmentExecState::coordinator_callback), this,
-                                      _1, _2, _3)),
+          _executor(exec_env, std::bind<void>(std::mem_fn(&FragmentExecState::coordinator_callback),
+                                              this, std::placeholders::_1, std::placeholders::_2,
+                                              std::placeholders::_3)),
           _timeout_second(-1) {
     _start_time = DateTimeValue::local_time();
 }
@@ -287,8 +287,12 @@ void FragmentExecState::coordinator_callback(const Status& status, RuntimeProfil
         if (runtime_state->query_options().query_type == TQueryType::LOAD) {
             params.__set_loaded_rows(runtime_state->num_rows_load_total());
         }
-        profile->to_thrift(&params.profile);
-        params.__isset.profile = true;
+        if (profile == nullptr) {
+            params.__isset.profile = false;
+        } else {
+            profile->to_thrift(&params.profile);
+            params.__isset.profile = true;
+        }
 
         if (!runtime_state->output_files().empty()) {
             params.__isset.delta_urls = true;
@@ -384,18 +388,19 @@ FragmentMgr::FragmentMgr(ExecEnv* exec_env)
         return _fragment_map.size();
     });
 
-    CHECK(Thread::create(
-                  "FragmentMgr", "cancel_timeout_plan_fragment",
-                  [this]() { this->cancel_worker(); }, &_cancel_thread)
-                  .ok());
+    auto s = Thread::create(
+            "FragmentMgr", "cancel_timeout_plan_fragment", [this]() { this->cancel_worker(); },
+            &_cancel_thread);
+    CHECK(s.ok()) << s.to_string();
 
     // TODO(zc): we need a better thread-pool
     // now one user can use all the thread pool, others have no resource.
-    ThreadPoolBuilder("FragmentMgrThreadPool")
-            .set_min_threads(config::fragment_pool_thread_num_min)
-            .set_max_threads(config::fragment_pool_thread_num_max)
-            .set_max_queue_size(config::fragment_pool_queue_size)
-            .build(&_thread_pool);
+    s = ThreadPoolBuilder("FragmentMgrThreadPool")
+                .set_min_threads(config::fragment_pool_thread_num_min)
+                .set_max_threads(config::fragment_pool_thread_num_max)
+                .set_max_queue_size(config::fragment_pool_queue_size)
+                .build(&_thread_pool);
+    CHECK(s.ok()) << s.to_string();
 }
 
 FragmentMgr::~FragmentMgr() {
@@ -432,7 +437,7 @@ void FragmentMgr::_exec_actual(std::shared_ptr<FragmentExecState> exec_state, Fi
     {
         std::lock_guard<std::mutex> lock(_lock);
         _fragment_map.erase(exec_state->fragment_instance_id());
-        if (all_done) {
+        if (all_done && fragments_ctx) {
             _fragments_ctx_map.erase(fragments_ctx->query_id);
         }
     }
@@ -581,31 +586,6 @@ void FragmentMgr::cancel_worker() {
         }
     } while (!_stop_background_threads_latch.wait_for(MonoDelta::FromSeconds(1)));
     LOG(INFO) << "FragmentMgr cancel worker is going to exit.";
-}
-
-Status FragmentMgr::trigger_profile_report(const PTriggerProfileReportRequest* request) {
-    if (request->instance_ids_size() > 0) {
-        for (int i = 0; i < request->instance_ids_size(); i++) {
-            const PUniqueId& p_fragment_id = request->instance_ids(i);
-            TUniqueId id;
-            id.__set_hi(p_fragment_id.hi());
-            id.__set_lo(p_fragment_id.lo());
-            {
-                std::lock_guard<std::mutex> lock(_lock);
-                auto iter = _fragment_map.find(id);
-                if (iter != _fragment_map.end()) {
-                    iter->second->executor()->report_profile_once();
-                }
-            }
-        }
-    } else {
-        std::lock_guard<std::mutex> lock(_lock);
-        auto iter = _fragment_map.begin();
-        for (; iter != _fragment_map.end(); iter++) {
-            iter->second->executor()->report_profile_once();
-        }
-    }
-    return Status::OK();
 }
 
 void FragmentMgr::debug(std::stringstream& ss) {

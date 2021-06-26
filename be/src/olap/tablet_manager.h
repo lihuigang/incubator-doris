@@ -24,6 +24,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "agent/status.h"
@@ -71,7 +72,9 @@ public:
 
     TabletSharedPtr find_best_tablet_to_compaction(CompactionType compaction_type,
                                                    DataDir* data_dir,
-                                                   vector<TTabletId>& tablet_submitted_compaction);
+                                                   const std::unordered_set<TTabletId>& tablet_submitted_compaction,
+                                                   uint32_t* score,
+                                                   std::shared_ptr<CumulativeCompactionPolicy> cumulative_compaction_policy);
 
     TabletSharedPtr get_tablet(TTabletId tablet_id, SchemaHash schema_hash,
                                bool include_deleted = false, std::string* err = nullptr);
@@ -101,7 +104,7 @@ public:
     //   where we should change tablet status from shutdown back to running
     OLAPStatus load_tablet_from_meta(DataDir* data_dir, TTabletId tablet_id,
                                      TSchemaHash schema_hash, const std::string& header,
-                                     bool update_meta, bool force = false, bool restore = false);
+                                     bool update_meta, bool force = false, bool restore = false, bool check_path=true);
 
     OLAPStatus load_tablet_from_dir(DataDir* data_dir, TTabletId tablet_id, SchemaHash schema_hash,
                                     const std::string& schema_hash_path, bool force = false,
@@ -115,7 +118,7 @@ public:
     //        OLAP_ERR_INPUT_PARAMETER_ERROR, if tables is null
     OLAPStatus report_tablet_info(TTabletInfo* tablet_info);
 
-    OLAPStatus report_all_tablets_info(std::map<TTabletId, TTablet>* tablets_info);
+    OLAPStatus build_all_report_tablets_info(std::map<TTabletId, TTablet>* tablets_info);
 
     OLAPStatus start_trash_sweep();
     // Prevent schema change executed concurrently.
@@ -135,6 +138,10 @@ public:
 
     void register_clone_tablet(int64_t tablet_id);
     void unregister_clone_tablet(int64_t tablet_id);
+
+    void get_tablets_distribution_on_different_disks(
+                    std::map<int64_t, std::map<DataDir*, int64_t>> &tablets_num_on_disk,
+                    std::map<int64_t, std::map<DataDir*, std::vector<TabletSize>>> &tablets_info_on_disk);
 
 private:
     // Add a tablet pointer to StorageEngine
@@ -182,7 +189,7 @@ private:
 
     void _remove_tablet_from_partition(const Tablet& tablet);
 
-    inline RWMutex& _get_tablet_map_lock(TTabletId tabletId);
+    RWMutex* _get_tablets_shard_lock(TTabletId tabletId);
 
 private:
     DISALLOW_COPY_AND_ASSIGN(TabletManager);
@@ -199,10 +206,20 @@ private:
     // tablet_id -> TabletInstances
     typedef std::unordered_map<int64_t, TableInstances> tablet_map_t;
 
-    const int32_t _tablet_map_lock_shard_size;
-    // _tablet_map_lock_array[i] protect _tablet_map_array[i], i=0,1,2...,and i < _tablet_map_lock_shard_size
-    RWMutex* _tablet_map_lock_array;
-    tablet_map_t* _tablet_map_array;
+    struct tablets_shard {
+        // protect tablet_map, tablets_under_clone and tablets_under_restore
+        std::unique_ptr<RWMutex> lock;
+        tablet_map_t tablet_map;
+        std::set<int64_t> tablets_under_clone;
+        std::set<int64_t> tablets_under_restore;
+    };
+
+    // trace the memory use by meta of tablet
+    std::shared_ptr<MemTracker> _mem_tracker;
+
+    const int32_t _tablets_shards_size;
+    const int32_t _tablets_shards_mask;
+    std::vector<tablets_shard> _tablets_shards;
 
     // Protect _partition_tablet_map, should not be obtained before _tablet_map_lock to avoid dead lock
     RWMutex _partition_tablet_map_lock;
@@ -219,19 +236,10 @@ private:
     // last update time of tablet stat cache
     int64_t _last_update_stat_ms;
 
-    inline tablet_map_t& _get_tablet_map(TTabletId tablet_id);
+    tablet_map_t& _get_tablet_map(TTabletId tablet_id);
 
-    std::set<int64_t> _tablets_under_clone;
-    std::set<int64_t> _tablets_under_restore;
+    tablets_shard& _get_tablets_shard(TTabletId tabletId);
 };
-
-inline RWMutex& TabletManager::_get_tablet_map_lock(TTabletId tabletId) {
-    return _tablet_map_lock_array[tabletId & (_tablet_map_lock_shard_size - 1)];
-}
-
-inline TabletManager::tablet_map_t& TabletManager::_get_tablet_map(TTabletId tabletId) {
-    return _tablet_map_array[tabletId & (_tablet_map_lock_shard_size - 1)];
-}
 
 } // namespace doris
 
