@@ -1,0 +1,7 @@
+#NOTE: This is a Maven Resolver internal implementation file, its format can be changed without prior notice.
+#Sat Jun 26 21:56:40 CST 2021
+https\://repository.cloudera.com/artifactory/public/.lastUpdated=1624715798334
+https\://maven.aliyun.com/repository/central/.lastUpdated=1624715800804
+https\://repository.cloudera.com/artifactory/public/.error=
+https\://repo.spring.io/plugins-release/.error=Could not transfer artifact org.apache.maven\:maven-monitor\:jar\:2.0.6 from/to spring-plugins (https\://repo.spring.io/plugins-release/)\: authentication failed for https\://repo.spring.io/plugins-release/org/apache/maven/maven-monitor/2.0.6/maven-monitor-2.0.6.jar, status\: 401 Unauthorized
+@default-spring-plugins-https\://repo.spring.io/plugins-release/.lastUpdated=1624715794696

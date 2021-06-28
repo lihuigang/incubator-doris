@@ -138,9 +138,9 @@ public class PaloFe {
 
             ThreadPoolManager.registerAllThreadPoolMetric();
 
-            while (true) {
-                Thread.sleep(2000);
-            }
+//            while (true) {
+//                Thread.sleep(2000);
+//            }
         } catch (Throwable e) {
             e.printStackTrace();
             return;
