@@ -17,11 +17,14 @@
 
 package org.apache.doris.analysis;
 
+import org.apache.doris.catalog.Catalog;
 import org.apache.doris.common.AnalysisException;
+import org.apache.doris.common.FeConstants;
 import org.apache.doris.common.FeNameFormat;
 import org.apache.doris.common.UserException;
 import org.apache.doris.common.util.TimeUtils;
 import org.apache.doris.common.util.Util;
+import org.apache.doris.load.routineload.RoutineLoadJob;
 
 import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Maps;
@@ -42,7 +45,7 @@ public class AlterRoutineLoadStmt extends DdlStmt {
 
     private static final String NAME_TYPE = "ROUTINE LOAD NAME";
 
-    private static final ImmutableSet<String> CONFIGURABLE_PROPERTIES_SET = new ImmutableSet.Builder<String>()
+    private static final ImmutableSet<String> CONFIGURABLE_JOB_PROPERTIES_SET = new ImmutableSet.Builder<String>()
             .add(CreateRoutineLoadStmt.DESIRED_CONCURRENT_NUMBER_PROPERTY)
             .add(CreateRoutineLoadStmt.MAX_ERROR_NUMBER_PROPERTY)
             .add(CreateRoutineLoadStmt.MAX_BATCH_INTERVAL_SEC_PROPERTY)
@@ -51,6 +54,8 @@ public class AlterRoutineLoadStmt extends DdlStmt {
             .add(CreateRoutineLoadStmt.JSONPATHS)
             .add(CreateRoutineLoadStmt.JSONROOT)
             .add(CreateRoutineLoadStmt.STRIP_OUTER_ARRAY)
+            .add(CreateRoutineLoadStmt.NUM_AS_STRING)
+            .add(CreateRoutineLoadStmt.FUZZY_PARSE)
             .add(LoadStmt.STRICT_MODE)
             .add(LoadStmt.TIMEZONE)
             .build();
@@ -108,7 +113,7 @@ public class AlterRoutineLoadStmt extends DdlStmt {
 
     private void checkJobProperties() throws UserException {
         Optional<String> optional = jobProperties.keySet().stream().filter(
-                entity -> !CONFIGURABLE_PROPERTIES_SET.contains(entity)).findFirst();
+                entity -> !CONFIGURABLE_JOB_PROPERTIES_SET.contains(entity)).findFirst();
         if (optional.isPresent()) {
             throw new AnalysisException(optional.get() + " is invalid property");
         }
@@ -178,12 +183,27 @@ public class AlterRoutineLoadStmt extends DdlStmt {
 
         if (jobProperties.containsKey(CreateRoutineLoadStmt.STRIP_OUTER_ARRAY)) {
             boolean stripOuterArray = Boolean.valueOf(jobProperties.get(CreateRoutineLoadStmt.STRIP_OUTER_ARRAY));
-            analyzedJobProperties.put(jobProperties.get(CreateRoutineLoadStmt.STRIP_OUTER_ARRAY),
-                    String.valueOf(stripOuterArray));
+            analyzedJobProperties.put(CreateRoutineLoadStmt.STRIP_OUTER_ARRAY, String.valueOf(stripOuterArray));
+        }
+
+        if (jobProperties.containsKey(CreateRoutineLoadStmt.NUM_AS_STRING)) {
+            boolean numAsString = Boolean.valueOf(jobProperties.get(CreateRoutineLoadStmt.NUM_AS_STRING));
+            analyzedJobProperties.put(CreateRoutineLoadStmt.NUM_AS_STRING, String.valueOf(numAsString));
+        }
+
+        if (jobProperties.containsKey(CreateRoutineLoadStmt.FUZZY_PARSE)) {
+            boolean fuzzyParse = Boolean.valueOf(jobProperties.get(CreateRoutineLoadStmt.FUZZY_PARSE));
+            analyzedJobProperties.put(CreateRoutineLoadStmt.FUZZY_PARSE, String.valueOf(fuzzyParse));
         }
     }
 
-    private void checkDataSourceProperties() throws AnalysisException {
+    private void checkDataSourceProperties() throws UserException {
+        if (!FeConstants.runningUnitTest) {
+            RoutineLoadJob job = Catalog.getCurrentCatalog().getRoutineLoadManager().checkPrivAndGetJob(getDbName(), getLabel());
+            dataSourceProperties.setTimezone(job.getTimezone());
+        } else {
+            dataSourceProperties.setTimezone(TimeUtils.DEFAULT_TIME_ZONE);
+        }
         dataSourceProperties.analyze();
     }
 }

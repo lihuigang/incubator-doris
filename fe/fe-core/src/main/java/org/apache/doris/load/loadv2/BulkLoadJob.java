@@ -17,6 +17,7 @@
 
 package org.apache.doris.load.loadv2;
 
+import org.apache.commons.lang.StringUtils;
 import org.apache.doris.analysis.BrokerDesc;
 import org.apache.doris.analysis.DataDescription;
 import org.apache.doris.analysis.LoadStmt;
@@ -37,7 +38,10 @@ import org.apache.doris.common.util.LogKey;
 import org.apache.doris.common.util.SqlParserUtils;
 import org.apache.doris.load.BrokerFileGroup;
 import org.apache.doris.load.BrokerFileGroupAggInfo;
+import org.apache.doris.load.EtlJobType;
 import org.apache.doris.load.FailMsg;
+import org.apache.doris.plugin.AuditEvent;
+import org.apache.doris.plugin.LoadAuditEvent;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.qe.OriginStatement;
 import org.apache.doris.qe.SessionVariable;
@@ -45,13 +49,13 @@ import org.apache.doris.qe.SqlModeHelper;
 import org.apache.doris.transaction.TabletCommitInfo;
 import org.apache.doris.transaction.TransactionState;
 
+import org.apache.logging.log4j.LogManager;
+import org.apache.logging.log4j.Logger;
+
 import com.google.common.base.Strings;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.common.collect.Sets;
-
-import org.apache.logging.log4j.LogManager;
-import org.apache.logging.log4j.Logger;
 
 import java.io.DataInput;
 import java.io.DataOutput;
@@ -85,13 +89,12 @@ public abstract class BulkLoadJob extends LoadJob {
     // we persist these sessionVariables due to the session is not available when replaying the job.
     private Map<String, String> sessionVariables = Maps.newHashMap();
 
-    // only for log replay
-    public BulkLoadJob() {
-        super();
+    public BulkLoadJob(EtlJobType jobType) {
+        super(jobType);
     }
 
-    public BulkLoadJob(long dbId, String label, OriginStatement originStmt, UserIdentity userInfo) throws MetaNotFoundException {
-        super(dbId, label);
+    public BulkLoadJob(EtlJobType jobType, long dbId, String label, OriginStatement originStmt, UserIdentity userInfo) throws MetaNotFoundException {
+        super(jobType, dbId, label);
         this.originStmt = originStmt;
         this.authorizationInfo = gatherAuthInfo();
         this.userInfo = userInfo;
@@ -164,7 +167,7 @@ public abstract class BulkLoadJob extends LoadJob {
     private AuthorizationInfo gatherAuthInfo() throws MetaNotFoundException {
         Database database = Catalog.getCurrentCatalog().getDb(dbId);
         if (database == null) {
-            throw new MetaNotFoundException("Database " + dbId + "has been deleted");
+            throw new MetaNotFoundException("Database " + dbId + " has been deleted");
         }
         return new AuthorizationInfo(database.getFullName(), getTableNames());
     }
@@ -191,7 +194,7 @@ public abstract class BulkLoadJob extends LoadJob {
     }
 
     @Override
-    public Set<String> getTableNames() throws MetaNotFoundException{
+    public Set<String> getTableNames() throws MetaNotFoundException {
         Set<String> result = Sets.newHashSet();
         Database database = Catalog.getCurrentCatalog().getDb(dbId);
         if (database == null) {
@@ -340,8 +343,10 @@ public abstract class BulkLoadJob extends LoadJob {
 
         if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_93) {
             userInfo = UserIdentity.read(in);
+            // must set is as analyzed, because when write the user info to meta image, it will be checked.
+            userInfo.setIsAnalyzed();
         } else {
-            userInfo = new UserIdentity("","");
+            userInfo = UserIdentity.UNKNOWN;
         }
         if (Catalog.getCurrentCatalogJournalVersion() >= FeMetaVersion.VERSION_66) {
             int size = in.readInt();
@@ -360,7 +365,43 @@ public abstract class BulkLoadJob extends LoadJob {
         return userInfo;
     }
 
-    public void setUserInfo(UserIdentity userInfo) {
-        this.userInfo = userInfo;
+    @Override
+    protected void auditFinishedLoadJob() {
+        try {
+            String dbName = getDb().getFullName();
+            String tableListName = StringUtils.join(getTableNames(), ",");
+            List<String> filePathList = Lists.newArrayList();
+            for (List<BrokerFileGroup> brokerFileGroups : fileGroupAggInfo.getAggKeyToFileGroups().values()) {
+                for (BrokerFileGroup brokerFileGroup : brokerFileGroups) {
+                    filePathList.add("(" + StringUtils.join(brokerFileGroup.getFilePaths(), ",") + ")");
+                }
+            }
+            String filePathListName = StringUtils.join(filePathList, ",");
+            String brokerUserName = getBrokerUserName();
+            AuditEvent auditEvent = new LoadAuditEvent.AuditEventBuilder().setEventType(AuditEvent.EventType.LOAD_SUCCEED)
+                    .setJobId(id).setLabel(label).setLoadType(jobType.name()).setDb(dbName).setTableList(tableListName)
+                    .setFilePathList(filePathListName).setBrokerUser(brokerUserName).setTimestamp(createTimestamp)
+                    .setLoadStartTime(loadStartTimestamp).setLoadFinishTime(finishTimestamp)
+                    .setScanRows(loadStatistic.getScannedRows()).setScanBytes(loadStatistic.totalFileSizeB)
+                    .setFileNumber(loadStatistic.fileNum)
+                    .build();
+            Catalog.getCurrentCatalog().getAuditEventProcessor().handleAuditEvent(auditEvent);
+        } catch (Exception e) {
+            LOG.warn("audit finished load job info failed", e);
+        }
+    }
+
+    private String getBrokerUserName() {
+        Map<String, String> properties = brokerDesc.getProperties();
+        if (properties.containsKey("kerberos_principal")) {
+            return properties.get("kerberos_principal");
+        } else if (properties.containsKey("username")) {
+            return properties.get("username");
+        } else if (properties.containsKey("bos_accesskey")) {
+            return properties.get("bos_accesskey");
+        } else if (properties.containsKey("fs.s3a.access.key")) {
+            return properties.get("fs.s3a.access.key");
+        }
+        return null;
     }
 }

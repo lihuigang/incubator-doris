@@ -23,6 +23,7 @@ import org.apache.doris.catalog.Column;
 import org.apache.doris.catalog.Database;
 import org.apache.doris.catalog.FunctionSet;
 import org.apache.doris.catalog.OlapTable;
+import org.apache.doris.catalog.Table;
 import org.apache.doris.catalog.Table.TableType;
 import org.apache.doris.catalog.Type;
 import org.apache.doris.catalog.View;
@@ -39,7 +40,6 @@ import org.apache.doris.common.util.SqlUtils;
 import org.apache.doris.mysql.privilege.PrivPredicate;
 import org.apache.doris.qe.ConnectContext;
 import org.apache.doris.rewrite.ExprRewriter;
-
 import com.google.common.base.Preconditions;
 import com.google.common.base.Predicates;
 import com.google.common.base.Strings;
@@ -276,15 +276,16 @@ public class SelectStmt extends QueryStmt {
     }
 
     @Override
-    public void getDbs(Analyzer analyzer, Map<String, Database> dbs, Set<String> parentViewNameSet) throws AnalysisException {
-        getWithClauseDbs(analyzer, dbs, parentViewNameSet);
+    public void getTables(Analyzer analyzer, Map<Long, Table> tableMap, Set<String> parentViewNameSet) throws AnalysisException {
+        getWithClauseTables(analyzer, tableMap, parentViewNameSet);
         for (TableRef tblRef : fromClause_) {
             if (tblRef instanceof InlineViewRef) {
                 // Inline view reference
                 QueryStmt inlineStmt = ((InlineViewRef) tblRef).getViewStmt();
-                inlineStmt.getDbs(analyzer, dbs, parentViewNameSet);
+                inlineStmt.getTables(analyzer, tableMap, parentViewNameSet);
             } else {
                 String dbName = tblRef.getName().getDb();
+                String tableName = tblRef.getName().getTbl();
                 if (Strings.isNullOrEmpty(dbName)) {
                     dbName = analyzer.getDefaultDb();
                 } else {
@@ -296,23 +297,44 @@ public class SelectStmt extends QueryStmt {
                 if (Strings.isNullOrEmpty(dbName)) {
                     ErrorReport.reportAnalysisException(ErrorCode.ERR_NO_DB_ERROR);
                 }
-
+                if (Strings.isNullOrEmpty(tableName)) {
+                    ErrorReport.reportAnalysisException(ErrorCode.ERR_BAD_TABLE_ERROR);
+                }
                 Database db = analyzer.getCatalog().getDb(dbName);
                 if (db == null) {
                     ErrorReport.reportAnalysisException(ErrorCode.ERR_BAD_DB_ERROR, dbName);
                 }
+                Table table = db.getTable(tableName);
+                if (table == null) {
+                    ErrorReport.reportAnalysisException(ErrorCode.ERR_BAD_TABLE_ERROR, tableName);
+                }
 
                 // check auth
                 if (!Catalog.getCurrentCatalog().getAuth().checkTblPriv(ConnectContext.get(), dbName,
-                        tblRef.getName().getTbl(),
+                        tableName,
                         PrivPredicate.SELECT)) {
                     ErrorReport.reportAnalysisException(ErrorCode.ERR_TABLEACCESS_DENIED_ERROR, "SELECT",
                             ConnectContext.get().getQualifiedUser(),
                             ConnectContext.get().getRemoteIP(),
                             tblRef.getName().getTbl());
                 }
+                tableMap.put(table.getId(), table);
+            }
+        }
+    }
 
-                dbs.put(dbName, db);
+    @Override
+    public void getTableRefs(List<TableRef> tblRefs, Set<String> parentViewNameSet) {
+        getWithClauseTableRefs(tblRefs, parentViewNameSet);
+        for (TableRef tblRef : fromClause_) {
+            if (tblRef instanceof InlineViewRef) {
+                QueryStmt inlineStmt = ((InlineViewRef) tblRef).getViewStmt();
+                inlineStmt.getTableRefs(tblRefs, parentViewNameSet);
+            } else {
+                if (isViewTableRef(tblRef.getName().toString(), parentViewNameSet)) {
+                    continue;
+                }
+                tblRefs.add(tblRef);
             }
         }
     }
@@ -507,6 +529,9 @@ public class SelectStmt extends QueryStmt {
                 LOG.debug("post-analysis " + aggInfo.debugString());
             }
         }
+        if (hasOutFileClause()) {
+            outFileClause.analyze(analyzer, this);
+        }
     }
 
     public List<TupleId> getTableRefIds() {
@@ -680,9 +705,13 @@ public class SelectStmt extends QueryStmt {
         } else {
             // rebuild CompoundPredicate if found duplicate predicate will build （predicate) and (.. or ..)  predicate in
             // step 1: will build (.. or ..)
-            result = CollectionUtils.isNotEmpty(cloneExprs) ? new CompoundPredicate(CompoundPredicate.Operator.AND,
-                    temp.get(0), makeCompound(temp.subList(1, temp.size()), CompoundPredicate.Operator.OR))
-                    : makeCompound(temp, CompoundPredicate.Operator.OR);
+            if (CollectionUtils.isNotEmpty(cloneExprs)) {
+                result = new CompoundPredicate(CompoundPredicate.Operator.AND, temp.get(0),
+                        makeCompound(temp.subList(1, temp.size()), CompoundPredicate.Operator.OR));
+                result.setPrintSqlInParens(true);
+            } else {
+                result = makeCompound(temp, CompoundPredicate.Operator.OR);
+            }
         }
         if (LOG.isDebugEnabled()) {
             LOG.debug("equal ors: " + result.toSql());
@@ -704,6 +733,7 @@ public class SelectStmt extends QueryStmt {
         for (int i = 2; i < exprs.size(); ++i) {
             result = new CompoundPredicate(op, result.clone(), exprs.get(i));
         }
+        result.setPrintSqlInParens(true);
         return result;
     }
 
@@ -959,7 +989,9 @@ public class SelectStmt extends QueryStmt {
             if (analyzer.isSemiJoined(tableRef.getId())) {
                 continue;
             }
-            expandStar(new TableName(null, tableRef.getAlias()), tableRef.getDesc());
+            expandStar(new TableName(tableRef.getAliasAsName().getDb(),
+                            tableRef.getAliasAsName().getTbl()),
+                    tableRef.getDesc());
         }
     }
 

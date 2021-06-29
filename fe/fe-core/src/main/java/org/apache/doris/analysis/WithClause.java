@@ -17,19 +17,18 @@
 
 package org.apache.doris.analysis;
 
+import org.apache.doris.catalog.Table;
+import org.apache.doris.catalog.View;
+import org.apache.doris.common.AnalysisException;
+import org.apache.doris.common.UserException;
+import com.google.common.base.Joiner;
+import com.google.common.base.Preconditions;
+import com.google.common.collect.Lists;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-
-import org.apache.doris.catalog.Database;
-import org.apache.doris.catalog.View;
-import org.apache.doris.common.AnalysisException;
-import org.apache.doris.common.UserException;
-
-import com.google.common.base.Joiner;
-import com.google.common.base.Preconditions;
-import com.google.common.collect.Lists;
 
 /**
  * Representation of the WITH clause that may appear before a query statement or insert
@@ -106,11 +105,19 @@ public class WithClause implements ParseNode {
         for (View view: views_) view.getQueryStmt().reset();
     }
 
-    public void getDbs(Analyzer analyzer, Map<String, Database> dbs, Set<String> parentViewNameSet) throws AnalysisException {
+    public void getTables(Analyzer analyzer, Map<Long, Table> tableMap, Set<String> parentViewNameSet) throws AnalysisException {
         for (View view : views_) {
             QueryStmt stmt = view.getQueryStmt();
             parentViewNameSet.add(view.getName());
-            stmt.getDbs(analyzer, dbs, parentViewNameSet);
+            stmt.getTables(analyzer, tableMap, parentViewNameSet);
+        }
+    }
+
+    public void getTableRefs(List<TableRef> tblRefs, Set<String> parentViewNameSet) {
+        for (View view : views_) {
+            QueryStmt stmt = view.getQueryStmt();
+            parentViewNameSet.add(view.getName());
+            stmt.getTableRefs(tblRefs, parentViewNameSet);
         }
     }
 

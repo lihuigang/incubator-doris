@@ -40,11 +40,14 @@ import org.apache.doris.common.util.LogBuilder;
 import org.apache.doris.common.util.LogKey;
 import org.apache.doris.common.util.SmallFileMgr;
 import org.apache.doris.common.util.SmallFileMgr.SmallFile;
+import org.apache.doris.common.util.TimeUtils;
 import org.apache.doris.persist.AlterRoutineLoadJobOperationLog;
 import org.apache.doris.system.SystemInfoService;
+import org.apache.doris.transaction.TransactionState;
 import org.apache.doris.transaction.TransactionStatus;
 
 import com.google.common.base.Joiner;
+import com.google.common.base.Preconditions;
 import com.google.common.collect.Lists;
 import com.google.common.collect.Maps;
 import com.google.gson.Gson;
@@ -60,6 +63,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.TimeZone;
 import java.util.UUID;
 
 /**
@@ -78,6 +82,9 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
     // current kafka partitions is the actually partition which will be fetched
     private List<Integer> currentKafkaPartitions = Lists.newArrayList();
     // optional, user want to set default offset when new partition add or offset not set.
+    // kafkaDefaultOffSet has two formats, one is the time format, eg: "2021-10-10 11:00:00",
+    // the other is string value, including OFFSET_END and OFFSET_BEGINNING.
+    // We should check it by calling isOffsetForTimes() method before use it.
     private String kafkaDefaultOffSet = "";
     // kafka properties ，property prefix will be mapped to kafka custom parameters, which can be extended in the future
     private Map<String, String> customProperties = Maps.newHashMap();
@@ -106,6 +113,16 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
 
     public Map<String, String> getConvertedCustomProperties() {
         return convertedCustomProperties;
+    }
+
+    private boolean isOffsetForTimes() {
+        long offset = TimeUtils.timeStringToLong(this.kafkaDefaultOffSet);
+        return offset != -1;
+    }
+
+    private long convertedDefaultOffsetToTimestamp() {
+        TimeZone timeZone = TimeUtils.getOrSystemTimeZone(getTimezone());
+        return TimeUtils.timeStringToLong(this.kafkaDefaultOffSet, timeZone);
     }
 
     @Override
@@ -140,11 +157,17 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
                 convertedCustomProperties.put(entry.getKey(), entry.getValue());
             }
         }
-        if (convertedCustomProperties.containsKey(CreateRoutineLoadStmt.KAFKA_DEFAULT_OFFSETS)) {
+
+        // This is mainly for compatibility. In the previous version, we directly obtained the value of the
+        // KAFKA_DEFAULT_OFFSETS attribute. In the new version, we support date time as the value of KAFKA_DEFAULT_OFFSETS,
+        // and this attribute will be converted into a timestamp during the analyzing phase, thus losing some information.
+        // So we use KAFKA_ORIGIN_DEFAULT_OFFSETS to store the original datetime formatted KAFKA_DEFAULT_OFFSETS value
+        if (convertedCustomProperties.containsKey(CreateRoutineLoadStmt.KAFKA_ORIGIN_DEFAULT_OFFSETS)) {
+            kafkaDefaultOffSet = convertedCustomProperties.remove(CreateRoutineLoadStmt.KAFKA_ORIGIN_DEFAULT_OFFSETS);
+        } else if (convertedCustomProperties.containsKey(CreateRoutineLoadStmt.KAFKA_DEFAULT_OFFSETS)) {
             kafkaDefaultOffSet = convertedCustomProperties.remove(CreateRoutineLoadStmt.KAFKA_DEFAULT_OFFSETS);
         }
     }
-
 
     @Override
     public void divideRoutineLoadJob(int currentConcurrentTaskNum) throws UserException {
@@ -198,46 +221,45 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
         return currentTaskConcurrentNum;
     }
 
-    // case1: BE execute the task successfully and commit it to FE, but failed on FE(such as db renamed, not found),
-    //        after commit failed, BE try to rollback this txn, and loaded rows in its attachment is larger than 0.
-    //        In this case, FE should not update the progress.
-    //
-    // case2: partitionIdToOffset must be not empty when loaded rows > 0
-    //        be commit txn but fe throw error when committing txn,
-    //        fe rollback txn without partitionIdToOffset by itself
-    //        this task should not be commit
-    //        otherwise currentErrorNum and currentTotalNum is updated when progress is not updated
+    // Through the transaction status and attachment information, to determine whether the progress needs to be updated.
     @Override
     protected boolean checkCommitInfo(RLTaskTxnCommitAttachment rlTaskTxnCommitAttachment,
-                                      TransactionStatus txnStatus) {
-        if (rlTaskTxnCommitAttachment.getLoadedRows() > 0 && txnStatus == TransactionStatus.ABORTED) {
-            // case 1
-            return false;
+                                      TransactionState txnState,
+                                      TransactionState.TxnStatusChangeReason txnStatusChangeReason) {
+        if (txnState.getTransactionStatus() == TransactionStatus.COMMITTED) {
+            // For committed txn, update the progress.
+            return true;
         }
 
-        if (rlTaskTxnCommitAttachment.getLoadedRows() > 0
-                && (!((KafkaProgress) rlTaskTxnCommitAttachment.getProgress()).hasPartition())) {
-            // case 2
-            LOG.warn(new LogBuilder(LogKey.ROUTINE_LOAD_TASK, DebugUtil.printId(rlTaskTxnCommitAttachment.getTaskId()))
-                    .add("job_id", id)
-                    .add("loaded_rows", rlTaskTxnCommitAttachment.getLoadedRows())
-                    .add("progress_partition_offset_size", 0)
-                    .add("msg", "commit attachment info is incorrect"));
-            return false;
+        if (txnStatusChangeReason != null && txnStatusChangeReason == TransactionState.TxnStatusChangeReason.NO_PARTITIONS) {
+            // Because the max_filter_ratio of routine load task is always 1.
+            // Therefore, under normal circumstances, routine load task will not return the error "too many filtered rows".
+            // If no data is imported, the error "all partitions have no load data" may only be returned.
+            // In this case, the status of the transaction is ABORTED,
+            // but we still need to update the offset to skip these error lines.
+            Preconditions.checkState(txnState.getTransactionStatus() == TransactionStatus.ABORTED, txnState.getTransactionStatus());
+            return true;
         }
-        return true;
+
+        // Running here, the status of the transaction should be ABORTED,
+        // and it is caused by other errors. In this case, we should not update the offset.
+        LOG.debug("no need to update the progress of kafka routine load. txn status: {}, " +
+                        "txnStatusChangeReason: {}, task: {}, job: {}",
+                txnState.getTransactionStatus(), txnStatusChangeReason,
+                DebugUtil.printId(rlTaskTxnCommitAttachment.getTaskId()), id);
+        return false;
     }
 
     @Override
     protected void updateProgress(RLTaskTxnCommitAttachment attachment) throws UserException {
         super.updateProgress(attachment);
-        this.progress.update(attachment.getProgress());
+        this.progress.update(attachment);
     }
 
     @Override
     protected void replayUpdateProgress(RLTaskTxnCommitAttachment attachment) {
         super.replayUpdateProgress(attachment);
-        this.progress.update(attachment.getProgress());
+        this.progress.update(attachment);
     }
 
     @Override
@@ -254,7 +276,7 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
     }
 
     @Override
-    protected void unprotectUpdateProgress() {
+    protected void unprotectUpdateProgress() throws UserException {
         updateNewPartitionProgress();
     }
 
@@ -346,15 +368,9 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
             ErrorReport.reportDdlException(ErrorCode.ERR_BAD_DB_ERROR, stmt.getDBName());
         }
 
-        long tableId = -1L;
-        db.readLock();
-        try {
-            unprotectedCheckMeta(db, stmt.getTableName(), stmt.getRoutineLoadDesc());
-            Table table = db.getTable(stmt.getTableName());
-            tableId = table.getId();
-        } finally {
-            db.readUnlock();
-        }
+        checkMeta(db, stmt.getTableName(), stmt.getRoutineLoadDesc());
+        Table table = db.getTable(stmt.getTableName());
+        long tableId = table.getId();
 
         // init kafka routine load job
         long id = Catalog.getCurrentCatalog().getNextId();
@@ -395,14 +411,21 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
         }
     }
 
-    private void updateNewPartitionProgress() {
+    private void updateNewPartitionProgress() throws LoadException {
         // update the progress of new partitions
         for (Integer kafkaPartition : currentKafkaPartitions) {
             if (!((KafkaProgress) progress).containsPartition(kafkaPartition)) {
                 // if offset is not assigned, start from OFFSET_END
                 long beginOffSet = KafkaProgress.OFFSET_END_VAL;
                 if (!kafkaDefaultOffSet.isEmpty()) {
-                    if (kafkaDefaultOffSet.equalsIgnoreCase(KafkaProgress.OFFSET_BEGINNING)) {
+                    if (isOffsetForTimes()) {
+                        // get offset by time
+                        List<Pair<Integer, Long>> offsets = Lists.newArrayList();
+                        offsets.add(Pair.create(kafkaPartition, convertedDefaultOffsetToTimestamp()));
+                        offsets = KafkaUtil.getOffsetsForTimes(this.brokerList, this.topic, convertedCustomProperties, offsets);
+                        Preconditions.checkState(offsets.size() == 1);
+                        beginOffSet = offsets.get(0).second;
+                    } else if (kafkaDefaultOffSet.equalsIgnoreCase(KafkaProgress.OFFSET_BEGINNING)) {
                         beginOffSet = KafkaProgress.OFFSET_BEGINNING_VAL;
                     } else if (kafkaDefaultOffSet.equalsIgnoreCase(KafkaProgress.OFFSET_END)) {
                         beginOffSet = KafkaProgress.OFFSET_END_VAL;
@@ -426,7 +449,7 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
         super.setOptional(stmt);
 
         if (!stmt.getKafkaPartitionOffsets().isEmpty()) {
-            setCustomKafkaPartitions(stmt.getKafkaPartitionOffsets());
+            setCustomKafkaPartitions(stmt);
         }
         if (!stmt.getCustomKafkaProperties().isEmpty()) {
             setCustomKafkaProperties(stmt.getCustomKafkaProperties());
@@ -434,7 +457,15 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
     }
 
     // this is a unprotected method which is called in the initialization function
-    private void setCustomKafkaPartitions(List<Pair<Integer, Long>> kafkaPartitionOffsets) throws LoadException {
+    private void setCustomKafkaPartitions(CreateRoutineLoadStmt stmt) throws LoadException {
+        List<Pair<Integer, Long>> kafkaPartitionOffsets = stmt.getKafkaPartitionOffsets();
+        boolean isForTimes = stmt.isOffsetsForTimes();
+        if (isForTimes) {
+            // the offset is set by date time, we need to get the real offset by time
+            kafkaPartitionOffsets = KafkaUtil.getOffsetsForTimes(stmt.getKafkaBrokerList(), stmt.getKafkaTopic(),
+                    convertedCustomProperties, stmt.getKafkaPartitionOffsets());
+        }
+
         for (Pair<Integer, Long> partitionOffset : kafkaPartitionOffsets) {
             this.customKafkaPartitions.add(partitionOffset.first);
             ((KafkaProgress) progress).addPartitionOffset(partitionOffset);
@@ -503,15 +534,20 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
     }
 
     @Override
-    public void modifyProperties(AlterRoutineLoadStmt stmt) throws DdlException {
+    public void modifyProperties(AlterRoutineLoadStmt stmt) throws UserException {
         Map<String, String> jobProperties = stmt.getAnalyzedJobProperties();
         RoutineLoadDataSourceProperties dataSourceProperties = stmt.getDataSourceProperties();
+        if (dataSourceProperties.isOffsetsForTimes()) {
+            // if the partition offset is set by timestamp, convert it to real offset
+            convertTimestampToOffset(dataSourceProperties);
+        }
 
         writeLock();
         try {
             if (getState() != JobState.PAUSED) {
                 throw new DdlException("Only supports modification of PAUSED jobs");
             }
+
 
             modifyPropertiesInternal(jobProperties, dataSourceProperties);
 
@@ -521,6 +557,16 @@ public class KafkaRoutineLoadJob extends RoutineLoadJob {
         } finally {
             writeUnlock();
         }
+    }
+
+    private void convertTimestampToOffset(RoutineLoadDataSourceProperties dataSourceProperties) throws UserException {
+        List<Pair<Integer, Long>> partitionOffsets = dataSourceProperties.getKafkaPartitionOffsets();
+        if (partitionOffsets.isEmpty()) {
+            return;
+        }
+        List<Pair<Integer, Long>> newOffsets = KafkaUtil.getOffsetsForTimes(brokerList, topic,
+                convertedCustomProperties, partitionOffsets);
+        dataSourceProperties.setKafkaPartitionOffsets(newOffsets);
     }
 
     private void modifyPropertiesInternal(Map<String, String> jobProperties,

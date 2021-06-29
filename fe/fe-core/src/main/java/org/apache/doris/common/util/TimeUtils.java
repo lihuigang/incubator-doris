@@ -49,13 +49,14 @@ import java.util.regex.Pattern;
 public class TimeUtils {
     private static final Logger LOG = LogManager.getLogger(TimeUtils.class);
 
+    public static final String UTC_TIME_ZONE = "Europe/London"; // This is just a Country to represent UTC offset +00:00
     public static final String DEFAULT_TIME_ZONE = "Asia/Shanghai";
 
     private static final TimeZone TIME_ZONE;
 
     // set CST to +08:00 instead of America/Chicago
     public static final ImmutableMap<String, String> timeZoneAliasMap = ImmutableMap.of(
-            "CST", DEFAULT_TIME_ZONE, "PRC", DEFAULT_TIME_ZONE);
+            "CST", DEFAULT_TIME_ZONE, "PRC", DEFAULT_TIME_ZONE, "UTC", UTC_TIME_ZONE);
 
     // NOTICE: Date formats are not synchronized.
     // it must be used as synchronized externally.
@@ -232,14 +233,22 @@ public class TimeUtils {
         }
     }
 
-    public static long dateTransform(long time, Type type) {
-        return dateTransform(time, type.getPrimitiveType());
-    }
-
     public static long timeStringToLong(String timeStr) {
         Date d;
         try {
             d = DATETIME_FORMAT.parse(timeStr);
+        } catch (ParseException e) {
+            return -1;
+        }
+        return d.getTime();
+    }
+
+    public static long timeStringToLong(String timeStr, TimeZone timeZone) {
+        SimpleDateFormat dateFormatTimeZone = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss");
+        dateFormatTimeZone.setTimeZone(timeZone);
+        Date d;
+        try {
+            d = dateFormatTimeZone.parse(timeStr);
         } catch (ParseException e) {
             return -1;
         }

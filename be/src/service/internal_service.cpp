@@ -77,7 +77,13 @@ void PInternalServiceImpl<T>::exec_plan_fragment(google::protobuf::RpcController
                                                  google::protobuf::Closure* done) {
     brpc::ClosureGuard closure_guard(done);
     brpc::Controller* cntl = static_cast<brpc::Controller*>(cntl_base);
-    auto st = _exec_plan_fragment(cntl);
+    auto st = Status::OK();
+    if (request->has_request()) {
+        st = _exec_plan_fragment(request->request());
+    } else {
+        // TODO(yangzhengguo) this is just for compatible with old version, this should be removed in the release 0.15
+        st = _exec_plan_fragment(cntl->request_attachment().to_string());
+    }
     if (!st.ok()) {
         LOG(WARNING) << "exec plan fragment failed, errmsg=" << st.get_error_msg();
     }
@@ -97,11 +103,10 @@ void PInternalServiceImpl<T>::tablet_writer_add_batch(google::protobuf::RpcContr
     _tablet_worker_pool.offer([request, response, done, this]() {
         brpc::ClosureGuard closure_guard(done);
         int64_t execution_time_ns = 0;
-        int64_t wait_lock_time_ns = 0;
         {
             SCOPED_RAW_TIMER(&execution_time_ns);
             auto st = _exec_env->load_channel_mgr()->add_batch(
-                    *request, response->mutable_tablet_vec(), &wait_lock_time_ns);
+                    *request, response->mutable_tablet_vec());
             if (!st.ok()) {
                 LOG(WARNING) << "tablet writer add batch failed, message=" << st.get_error_msg()
                              << ", id=" << request->id() << ", index_id=" << request->index_id()
@@ -110,7 +115,6 @@ void PInternalServiceImpl<T>::tablet_writer_add_batch(google::protobuf::RpcContr
             st.to_protobuf(response->mutable_status());
         }
         response->set_execution_time_us(execution_time_ns / 1000);
-        response->set_wait_lock_time_us(wait_lock_time_ns / 1000);
     });
 }
 
@@ -131,8 +135,7 @@ void PInternalServiceImpl<T>::tablet_writer_cancel(google::protobuf::RpcControll
 }
 
 template <typename T>
-Status PInternalServiceImpl<T>::_exec_plan_fragment(brpc::Controller* cntl) {
-    auto ser_request = cntl->request_attachment().to_string();
+Status PInternalServiceImpl<T>::_exec_plan_fragment(const std::string& ser_request) {
     TExecPlanFragmentParams t_request;
     {
         const uint8_t* buf = (const uint8_t*)ser_request.data();
@@ -174,18 +177,9 @@ void PInternalServiceImpl<T>::fetch_data(google::protobuf::RpcController* cntl_b
                                          const PFetchDataRequest* request, PFetchDataResult* result,
                                          google::protobuf::Closure* done) {
     brpc::Controller* cntl = static_cast<brpc::Controller*>(cntl_base);
-    GetResultBatchCtx* ctx = new GetResultBatchCtx(cntl, result, done);
+    bool resp_in_attachment = request->has_resp_in_attachment() ? request->resp_in_attachment() : true;
+    GetResultBatchCtx* ctx = new GetResultBatchCtx(cntl, resp_in_attachment, result, done);
     _exec_env->result_mgr()->fetch_data(request->finst_id(), ctx);
-}
-
-template <typename T>
-void PInternalServiceImpl<T>::trigger_profile_report(google::protobuf::RpcController* controller,
-                                                     const PTriggerProfileReportRequest* request,
-                                                     PTriggerProfileReportResult* result,
-                                                     google::protobuf::Closure* done) {
-    brpc::ClosureGuard closure_guard(done);
-    auto st = _exec_env->fragment_mgr()->trigger_profile_report(request);
-    st.to_protobuf(result->mutable_status());
 }
 
 template <typename T>
@@ -193,19 +187,42 @@ void PInternalServiceImpl<T>::get_info(google::protobuf::RpcController* controll
                                        const PProxyRequest* request, PProxyResult* response,
                                        google::protobuf::Closure* done) {
     brpc::ClosureGuard closure_guard(done);
+    // PProxyRequest is defined in gensrc/proto/internal_service.proto
+    // Currently it supports 2 kinds of requests:
+    // 1. get all kafka partition ids for given topic
+    // 2. get all kafka partition offsets for given topic and timestamp.
     if (request->has_kafka_meta_request()) {
-        std::vector<int32_t> partition_ids;
-        Status st = _exec_env->routine_load_task_executor()->get_kafka_partition_meta(
-                request->kafka_meta_request(), &partition_ids);
-        if (st.ok()) {
-            PKafkaMetaProxyResult* kafka_result = response->mutable_kafka_meta_result();
-            for (int32_t id : partition_ids) {
-                kafka_result->add_partition_ids(id);
+        const PKafkaMetaProxyRequest& kafka_request = request->kafka_meta_request();
+        if (!kafka_request.offset_times().empty()) {
+            // if offset_times() has elements, which means this request is to get offset by timestamp.
+            std::vector<PIntegerPair> partition_offsets;
+            Status st = _exec_env->routine_load_task_executor()->get_kafka_partition_offsets_for_times(
+                    request->kafka_meta_request(), &partition_offsets);
+            if (st.ok()) {
+                PKafkaPartitionOffsets* part_offsets = response->mutable_partition_offsets();
+                for (const auto& entry : partition_offsets) {
+                    PIntegerPair* res = part_offsets->add_offset_times();
+                    res->set_key(entry.key());
+                    res->set_val(entry.val());
+                }
             }
+            st.to_protobuf(response->mutable_status());
+            return;
+        } else {
+            // get partition ids of topic
+            std::vector<int32_t> partition_ids;
+            Status st = _exec_env->routine_load_task_executor()->get_kafka_partition_meta(
+                    request->kafka_meta_request(), &partition_ids);
+            if (st.ok()) {
+                PKafkaMetaProxyResult* kafka_result = response->mutable_kafka_meta_result();
+                for (int32_t id : partition_ids) {
+                    kafka_result->add_partition_ids(id);
+                }
+            }
+            st.to_protobuf(response->mutable_status());
+            return;
         }
-        st.to_protobuf(response->mutable_status());
-        return;
-    }
+    } 
     Status::OK().to_protobuf(response->mutable_status());
 }
 

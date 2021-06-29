@@ -98,6 +98,9 @@ public class ConnectContext {
 
     protected String remoteIP;
 
+    // This is used to statistic the current query details.
+    // This property will only be set when the query starts to execute.
+    // So in the query planning stage, do not use any value in this attribute.
     protected QueryDetail queryDetail;
 
     public static ConnectContext get() {
@@ -139,6 +142,11 @@ public class ConnectContext {
             remoteIP = mysqlChannel.getRemoteIp();
         }
         queryDetail = null;
+    }
+
+    // Just for unit test
+    public void resetSessionVariables() {
+        sessionVariable = VariableMgr.newSessionVariable();
     }
 
     public long getStmtId() {

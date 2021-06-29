@@ -100,7 +100,8 @@ public class TransactionState implements Writable {
         DB_DROPPED,
         TIMEOUT,
         OFFSET_OUT_OF_RANGE,
-        PAUSE;
+        PAUSE,
+        NO_PARTITIONS;
 
         public static TxnStatusChangeReason fromString(String reasonString) {
             for (TxnStatusChangeReason txnStatusChangeReason : TxnStatusChangeReason.values()) {
@@ -116,6 +117,8 @@ public class TransactionState implements Writable {
             switch (this) {
                 case OFFSET_OUT_OF_RANGE:
                     return "Offset out of range";
+                case NO_PARTITIONS:
+                    return "all partitions have no load data";
                 default:
                     return this.name();
             }
@@ -183,14 +186,24 @@ public class TransactionState implements Writable {
     // error replica ids
     private Set<Long> errorReplicas;
     private CountDownLatch latch;
-    
+
     // this state need not to be serialized
     private Map<Long, PublishVersionTask> publishVersionTasks;
     private boolean hasSendTask;
     private long publishVersionTime = -1;
     private TransactionStatus preStatus = null;
-    
+
     private long callbackId = -1;
+    // In the beforeStateTransform() phase, we will get the callback object through the callbackId,
+    // and if we get it, we will save it in this variable.
+    // The main function of this variable is to retain a reference to this callback object.
+    // In order to prevent in the afterStateTransform() phase the callback object may have been removed
+    // from the CallbackFactory, resulting in the inability to obtain the object, causing some bugs
+    // such as
+    // 1. the write lock of callback object has been called in beforeStateTransform()
+    // 2. callback object has been removed from CallbackFactory
+    // 3. in afterStateTransform(), callback object can not be found, so the write lock can not be released.
+    private TxnStateChangeCallback callback = null;
     private long timeoutMs = Config.stream_load_default_timeout_second;
 
     // is set to true, we will double the publish timeout
@@ -198,7 +211,7 @@ public class TransactionState implements Writable {
 
     // optional
     private TxnCommitAttachment txnCommitAttachment;
-    
+
     // this map should be set when load execution begin, so that when the txn commit, it will know
     // which tables and rollups it loaded.
     // tbl id -> (index ids)
@@ -363,8 +376,7 @@ public class TransactionState implements Writable {
 
     public void beforeStateTransform(TransactionStatus transactionStatus) throws TransactionException {
         // before status changed
-        TxnStateChangeCallback callback = Catalog.getCurrentGlobalTransactionMgr()
-                .getCallbackFactory().getCallback(callbackId);
+        callback = Catalog.getCurrentGlobalTransactionMgr().getCallbackFactory().getCallback(callbackId);
         if (callback != null) {
             switch (transactionStatus) {
                 case ABORTED:
@@ -395,8 +407,9 @@ public class TransactionState implements Writable {
     public void afterStateTransform(TransactionStatus transactionStatus, boolean txnOperated, String txnStatusChangeReason)
             throws UserException {
         // after status changed
-        TxnStateChangeCallback callback = Catalog.getCurrentGlobalTransactionMgr()
-                .getCallbackFactory().getCallback(callbackId);
+        if (callback == null) {
+            callback = Catalog.getCurrentGlobalTransactionMgr().getCallbackFactory().getCallback(callbackId);
+        }
         if (callback != null) {
             switch (transactionStatus) {
                 case ABORTED:
@@ -482,7 +495,21 @@ public class TransactionState implements Writable {
     
     // return true if txn is in final status and label is expired
     public boolean isExpired(long currentMillis) {
-        return transactionStatus.isFinalStatus() && (currentMillis - finishTime) / 1000 > Config.label_keep_max_second;
+        if (!transactionStatus.isFinalStatus()) {
+            return false;
+        }
+        long expireTime = Config.label_keep_max_second;
+        if (isShortTxn()) {
+            expireTime = Config.stream_load_default_timeout_second;
+        }
+        return (currentMillis - finishTime) / 1000 > expireTime;
+    }
+
+    // Return true if this txn is related to streaming load/insert/routine load task.
+    // We call these tasks "Short" tasks because they will be cleaned up in a short time after they are finished.
+    public boolean isShortTxn() {
+        return sourceType == LoadJobSourceType.BACKEND_STREAMING || sourceType == LoadJobSourceType.INSERT_STREAMING
+                || sourceType == LoadJobSourceType.ROUTINE_LOAD_TASK;
     }
 
     // return true if txn is running but timeout
@@ -490,12 +517,7 @@ public class TransactionState implements Writable {
         return transactionStatus == TransactionStatus.PREPARE && currentMillis - prepareTime > timeoutMs;
     }
 
-    /*
-     * Add related table indexes to the transaction.
-     * If function should always be called before adding this transaction state to transaction manager,
-     * No other thread will access this state. So no need to lock
-     */
-    public void addTableIndexes(OlapTable table) {
+    public synchronized void addTableIndexes(OlapTable table) {
         Set<Long> indexIds = loadedTblIndexes.get(table.getId());
         if (indexIds == null) {
             indexIds = Sets.newHashSet();

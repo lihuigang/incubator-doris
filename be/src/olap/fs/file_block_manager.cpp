@@ -169,13 +169,13 @@ Status FileWritableBlock::appendv(const Slice* data, size_t data_cnt) {
 
     // Calculate the amount of data written
     size_t bytes_written = accumulate(data, data + data_cnt, static_cast<size_t>(0),
-                                      [&](int sum, const Slice& curr) { return sum + curr.size; });
+                                      [](size_t sum, const Slice& curr) { return sum + curr.size; });
     _bytes_appended += bytes_written;
     return Status::OK();
 }
 
 Status FileWritableBlock::flush_data_async() {
-    VLOG(3) << "Flushing block " << _path;
+    VLOG_NOTICE << "Flushing block " << _path;
     RETURN_IF_ERROR(_writer->flush(WritableFile::FLUSH_ASYNC));
     return Status::OK();
 }
@@ -187,7 +187,7 @@ Status FileWritableBlock::finalize() {
     if (_state == FINALIZED) {
         return Status::OK();
     }
-    VLOG(3) << "Finalizing block " << _path;
+    VLOG_NOTICE << "Finalizing block " << _path;
     if (_state == DIRTY && BlockManager::block_manager_preflush_control == "finalize") {
         flush_data_async();
     }
@@ -211,7 +211,7 @@ Status FileWritableBlock::_close(SyncMode mode) {
     Status sync;
     if (mode == SYNC && (_state == CLEAN || _state == DIRTY || _state == FINALIZED)) {
         // Safer to synchronize data first, then metadata.
-        VLOG(3) << "Syncing block " << _path;
+        VLOG_NOTICE << "Syncing block " << _path;
         if (_block_manager->_metrics) {
             _block_manager->_metrics->total_disk_sync->increment(1);
         }
@@ -295,7 +295,7 @@ FileReadableBlock::FileReadableBlock(
         std::shared_ptr<OpenedFileHandle<RandomAccessFile>> file_handle)
         : _block_manager(block_manager),
           _path(std::move(path)),
-          _file_handle(file_handle),
+          _file_handle(std::move(file_handle)),
           _closed(false) {
     if (_block_manager->_metrics) {
         _block_manager->_metrics->blocks_open_reading->increment(1);
@@ -368,8 +368,8 @@ Status FileReadableBlock::readv(uint64_t offset, const Slice* results, size_t re
 FileBlockManager::FileBlockManager(Env* env, BlockManagerOptions opts)
         : _env(DCHECK_NOTNULL(env)),
           _opts(std::move(opts)),
-          _mem_tracker(
-                  MemTracker::CreateTracker(-1, "file_block_manager", _opts.parent_mem_tracker)) {
+          _mem_tracker(MemTracker::CreateTracker(-1, "FileBlockManager", _opts.parent_mem_tracker,
+                    false, false, MemTrackerLevel::OVERVIEW)) {
     if (_opts.enable_metric) {
         _metrics.reset(new internal::BlockManagerMetrics());
     }
@@ -399,14 +399,14 @@ Status FileBlockManager::create_block(const CreateBlockOptions& opts,
     wr_opts.mode = Env::MUST_CREATE;
     RETURN_IF_ERROR(env_util::open_file_for_write(wr_opts, _env, opts.path, &writer));
 
-    VLOG(1) << "Creating new block at " << opts.path;
+    VLOG_CRITICAL << "Creating new block at " << opts.path;
     block->reset(new internal::FileWritableBlock(this, opts.path, writer));
     return Status::OK();
 }
 
 Status FileBlockManager::open_block(const std::string& path,
                                     std::unique_ptr<ReadableBlock>* block) {
-    VLOG(1) << "Opening block with path at " << path;
+    VLOG_CRITICAL << "Opening block with path at " << path;
     std::shared_ptr<OpenedFileHandle<RandomAccessFile>> file_handle(
             new OpenedFileHandle<RandomAccessFile>());
     bool found = _file_cache->lookup(path, file_handle.get());

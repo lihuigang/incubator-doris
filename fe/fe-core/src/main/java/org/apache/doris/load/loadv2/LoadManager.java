@@ -96,19 +96,27 @@ public class LoadManager implements Writable{
      * @param stmt
      * @throws DdlException
      */
-    public void createLoadJobFromStmt(LoadStmt stmt) throws DdlException {
+    public long createLoadJobFromStmt(LoadStmt stmt) throws DdlException {
         Database database = checkDb(stmt.getLabel().getDbName());
         long dbId = database.getId();
         LoadJob loadJob = null;
         writeLock();
         try {
-            checkLabelUsed(dbId, stmt.getLabel().getLabelName());
-            if (stmt.getBrokerDesc() == null && stmt.getResourceDesc() == null) {
-                throw new DdlException("LoadManager only support the broker and spark load.");
-            }
-            if (loadJobScheduler.isQueueFull()) {
-                throw new DdlException("There are more than " + Config.desired_max_waiting_jobs + " load jobs in waiting queue, "
-                                               + "please retry later.");
+            if (stmt.getBrokerDesc() != null && stmt.getBrokerDesc().isMultiLoadBroker()) {
+                if (!Catalog.getCurrentCatalog().getLoadInstance()
+                        .isUncommittedLabel(dbId, stmt.getLabel().getLabelName())) {
+                    throw new DdlException("label: " + stmt.getLabel().getLabelName() + " not found!") ;
+                }
+
+            } else {
+                checkLabelUsed(dbId, stmt.getLabel().getLabelName());
+                if (stmt.getBrokerDesc() == null && stmt.getResourceDesc() == null) {
+                    throw new DdlException("LoadManager only support the broker and spark load.");
+                }
+                if (loadJobScheduler.isQueueFull()) {
+                    throw new DdlException("There are more than " + Config.desired_max_waiting_jobs + " load jobs in waiting queue, "
+                            + "please retry later.");
+                }
             }
             loadJob = BulkLoadJob.fromLoadStmt(stmt);
             createLoadJob(loadJob);
@@ -120,6 +128,7 @@ public class LoadManager implements Writable{
         // The job must be submitted after edit log.
         // It guarantee that load job has not been changed before edit log.
         loadJobScheduler.submitJob(loadJob);
+        return loadJob.getId();
     }
 
     /**
@@ -431,8 +440,7 @@ public class LoadManager implements Writable{
             Iterator<Map.Entry<Long, LoadJob>> iter = idToLoadJob.entrySet().iterator();
             while (iter.hasNext()) {
                 LoadJob job = iter.next().getValue();
-                if (job.isCompleted()
-                        && ((currentTimeMs - job.getFinishTimestamp()) / 1000 > Config.label_keep_max_second)) {
+                if (job.isExpired(currentTimeMs)) {
                     iter.remove();
                     dbIdToLabelToLoadJobs.get(job.getDbId()).get(job.getLabel()).remove(job);
                     if (job instanceof SparkLoadJob) {
@@ -618,14 +626,9 @@ public class LoadManager implements Writable{
      * @throws DdlException
      */
     private void checkTable(Database database, String tableName) throws DdlException {
-        database.readLock();
-        try {
-            if (database.getTable(tableName) == null) {
-                LOG.info("Table {} is not belongs to database {}", tableName, database.getFullName());
-                throw new DdlException("Table[" + tableName + "] does not exist");
-            }
-        } finally {
-            database.readUnlock();
+        if (database.getTable(tableName) == null) {
+            LOG.info("Table {} is not belongs to database {}", tableName, database.getFullName());
+            throw new DdlException("Table[" + tableName + "] does not exist");
         }
     }
 
@@ -671,20 +674,6 @@ public class LoadManager implements Writable{
 
     private void writeUnlock() {
         lock.writeLock().unlock();
-    }
-
-    // If load job will be removed by cleaner later, it will not be saved in image.
-    private boolean needSave(LoadJob loadJob) {
-        if (!loadJob.isCompleted()) {
-            return true;
-        }
-
-        long currentTimeMs = System.currentTimeMillis();
-        if (loadJob.isCompleted() && ((currentTimeMs - loadJob.getFinishTimestamp()) / 1000 <= Config.label_keep_max_second)) {
-            return true;
-        }
-
-        return false;
     }
 
     public void initJobProgress(Long jobId, TUniqueId loadId, Set<TUniqueId> fragmentIds,
@@ -801,7 +790,8 @@ public class LoadManager implements Writable{
 
     @Override
     public void write(DataOutput out) throws IOException {
-        List<LoadJob> loadJobs = idToLoadJob.values().stream().filter(this::needSave).collect(Collectors.toList());
+        long currentTimeMs = System.currentTimeMillis();
+        List<LoadJob> loadJobs = idToLoadJob.values().stream().filter(t -> !t.isExpired(currentTimeMs)).collect(Collectors.toList());
 
         out.writeInt(loadJobs.size());
         for (LoadJob loadJob : loadJobs) {

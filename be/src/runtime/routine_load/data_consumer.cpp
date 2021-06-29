@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "common/status.h"
+#include "gen_cpp/internal_service.pb.h"
 #include "gutil/strings/split.h"
 #include "runtime/small_file_mgr.h"
 #include "service/backend_options.h"
@@ -44,8 +45,7 @@ Status KafkaDataConsumer::init(StreamLoadContext* ctx) {
     RdKafka::Conf* conf = RdKafka::Conf::create(RdKafka::Conf::CONF_GLOBAL);
 
     // conf has to be deleted finally
-    auto conf_deleter = [conf]() { delete conf; };
-    DeferOp delete_conf(std::bind<void>(conf_deleter));
+    Defer delete_conf{[conf]() { delete conf; }};
 
     std::stringstream ss;
     ss << BackendOptions::get_localhost() << "_";
@@ -69,7 +69,7 @@ Status KafkaDataConsumer::init(StreamLoadContext* ctx) {
             LOG(WARNING) << ss.str();
             return Status::InternalError(ss.str());
         }
-        VLOG(3) << "set " << conf_key << ": " << conf_val;
+        VLOG_NOTICE << "set " << conf_key << ": " << conf_val;
         return Status::OK();
     };
 
@@ -122,7 +122,7 @@ Status KafkaDataConsumer::init(StreamLoadContext* ctx) {
         return Status::InternalError("PAUSE: failed to create kafka consumer: " + errstr);
     }
 
-    VLOG(3) << "finished to init kafka consumer. " << ctx->brief();
+    VLOG_NOTICE << "finished to init kafka consumer. " << ctx->brief();
 
     _init = true;
     return Status::OK();
@@ -146,11 +146,10 @@ Status KafkaDataConsumer::assign_topic_partitions(
               << " assign topic partitions: " << topic << ", " << ss.str();
 
     // delete TopicPartition finally
-    auto tp_deleter = [&topic_partitions]() {
+    Defer delete_tp{[&topic_partitions]() {
         std::for_each(topic_partitions.begin(), topic_partitions.end(),
                       [](RdKafka::TopicPartition* tp1) { delete tp1; });
-    };
-    DeferOp delete_tp(std::bind<void>(tp_deleter));
+    }};
 
     // assign partition
     RdKafka::ErrorCode err = _k_consumer->assign(topic_partitions);
@@ -238,8 +237,7 @@ Status KafkaDataConsumer::group_consume(BlockingQueue<RdKafka::Message*>* queue,
 Status KafkaDataConsumer::get_partition_meta(std::vector<int32_t>* partition_ids) {
     // create topic conf
     RdKafka::Conf* tconf = RdKafka::Conf::create(RdKafka::Conf::CONF_TOPIC);
-    auto conf_deleter = [tconf]() { delete tconf; };
-    DeferOp delete_conf(std::bind<void>(conf_deleter));
+    Defer delete_conf{[tconf]() { delete tconf; }};
 
     // create topic
     std::string errstr;
@@ -250,8 +248,8 @@ Status KafkaDataConsumer::get_partition_meta(std::vector<int32_t>* partition_ids
         LOG(WARNING) << ss.str();
         return Status::InternalError(ss.str());
     }
-    auto topic_deleter = [topic]() { delete topic; };
-    DeferOp delete_topic(std::bind<void>(topic_deleter));
+
+    Defer delete_topic{[topic]() { delete topic; }};
 
     // get topic metadata
     RdKafka::Metadata* metadata = nullptr;
@@ -263,8 +261,8 @@ Status KafkaDataConsumer::get_partition_meta(std::vector<int32_t>* partition_ids
         LOG(WARNING) << ss.str();
         return Status::InternalError(ss.str());
     }
-    auto meta_deleter = [metadata]() { delete metadata; };
-    DeferOp delete_meta(std::bind<void>(meta_deleter));
+
+    Defer delete_meta{[metadata]() { delete metadata; }};
 
     // get partition ids
     RdKafka::Metadata::TopicMetadataIterator it;
@@ -291,6 +289,48 @@ Status KafkaDataConsumer::get_partition_meta(std::vector<int32_t>* partition_ids
 
     if (partition_ids->empty()) {
         return Status::InternalError("no partition in this topic");
+    }
+
+    return Status::OK();
+}
+
+// get offsets of each partition for times.
+// The input parameter "times" holds <partition, timestamps>
+// The output parameter "offsets" returns <partition, offsets>
+//
+// The returned offset for each partition is the earliest offset whose
+// timestamp is greater than or equal to the given timestamp in the
+// corresponding partition.
+// See librdkafka/rdkafkacpp.h##offsetsForTimes()
+Status KafkaDataConsumer::get_offsets_for_times(const std::vector<PIntegerPair>& times,
+        std::vector<PIntegerPair>* offsets) {
+    // create topic partition
+    std::vector<RdKafka::TopicPartition*> topic_partitions;
+    for (const auto& entry : times) {
+        RdKafka::TopicPartition* tp1 =
+                RdKafka::TopicPartition::create(_topic, entry.key(), entry.val());
+        topic_partitions.push_back(tp1);
+    }
+    // delete TopicPartition finally
+    Defer delete_tp{[&topic_partitions]() {
+        std::for_each(topic_partitions.begin(), topic_partitions.end(),
+                      [](RdKafka::TopicPartition* tp1) { delete tp1; });
+    }};
+
+    // get offsets for times
+    RdKafka::ErrorCode err = _k_consumer->offsetsForTimes(topic_partitions, 5000);
+    if (err != RdKafka::ERR_NO_ERROR) {
+        std::stringstream ss;
+        ss << "failed to get offsets for times: " << RdKafka::err2str(err);
+        LOG(WARNING) << ss.str();
+        return Status::InternalError(ss.str());
+    }
+
+    for (const auto& topic_partition : topic_partitions) {
+        PIntegerPair pair;
+        pair.set_key(topic_partition->partition());
+        pair.set_val(topic_partition->offset());
+        offsets->push_back(pair);
     }
 
     return Status::OK();
@@ -337,7 +377,12 @@ bool KafkaDataConsumer::match(StreamLoadContext* ctx) {
         return false;
     }
     for (auto& item : ctx->kafka_info->properties) {
-        if (_custom_properties.find(item.first) == _custom_properties.end()) {
+        std::unordered_map<std::string, std::string>::const_iterator itr =_custom_properties.find(item.first);
+        if (itr == _custom_properties.end()) {
+            return false;
+        }
+
+        if (itr->second != item.second) {
             return false;
         }
     }

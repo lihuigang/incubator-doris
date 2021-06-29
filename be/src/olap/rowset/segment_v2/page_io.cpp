@@ -41,17 +41,22 @@ Status PageIO::compress_page_body(const BlockCompressionCodec* codec, double min
     size_t uncompressed_size = Slice::compute_total_size(body);
     if (codec != nullptr && uncompressed_size > 0) {
         size_t max_compressed_size = codec->max_compressed_len(uncompressed_size);
-        faststring buf;
-        buf.resize(max_compressed_size);
-        Slice compressed_slice(buf);
-        RETURN_IF_ERROR(codec->compress(body, &compressed_slice));
-        buf.resize(compressed_slice.get_size());
-
-        double space_saving = 1.0 - static_cast<double>(buf.size()) / uncompressed_size;
-        // return compressed body only when it saves more than min_space_saving
-        if (space_saving > 0 && space_saving >= min_space_saving) {
-            *compressed_body = buf.build();
-            return Status::OK();
+        if (max_compressed_size) {
+            faststring buf;
+            buf.resize(max_compressed_size);
+            Slice compressed_slice(buf);
+            RETURN_IF_ERROR(codec->compress(body, &compressed_slice));
+            buf.resize(compressed_slice.get_size());
+    
+            double space_saving = 1.0 - static_cast<double>(buf.size()) / uncompressed_size;
+            // return compressed body only when it saves more than min_space_saving
+            if (space_saving > 0 && space_saving >= min_space_saving) {
+                // shrink the buf to fit the len size to avoid taking
+                // up the memory of the size MAX_COMPRESSED_SIZE
+                buf.shrink_to_fit();
+                *compressed_body = buf.build();
+                return Status::OK();
+            }
         }
     }
     // otherwise, do not compress
@@ -112,7 +117,7 @@ Status PageIO::read_and_decompress_page(const PageReadOptions& opts, PageHandle*
     auto cache = StoragePageCache::instance();
     PageCacheHandle cache_handle;
     StoragePageCache::CacheKey cache_key(opts.rblock->path(), opts.page_pointer.offset);
-    if (opts.use_page_cache && cache->lookup(cache_key, &cache_handle)) {
+    if (opts.use_page_cache && cache->is_cache_available(opts.type) && cache->lookup(cache_key, &cache_handle, opts.type)) {
         // we find page in cache, use it
         *handle = PageHandle(std::move(cache_handle));
         opts.stats->cached_pages_num++;
@@ -189,9 +194,9 @@ Status PageIO::read_and_decompress_page(const PageReadOptions& opts, PageHandle*
     }
 
     *body = Slice(page_slice.data, page_slice.size - 4 - footer_size);
-    if (opts.use_page_cache) {
+    if (opts.use_page_cache && cache->is_cache_available(opts.type)) {
         // insert this page into cache and return the cache handle
-        cache->insert(cache_key, page_slice, &cache_handle, opts.kept_in_memory);
+        cache->insert(cache_key, page_slice, &cache_handle, opts.type, opts.kept_in_memory);
         *handle = PageHandle(std::move(cache_handle));
     } else {
         *handle = PageHandle(page_slice);

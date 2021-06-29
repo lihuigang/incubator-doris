@@ -18,8 +18,9 @@
 #ifndef DORIS_BE_RUNTIME_PLAN_FRAGMENT_EXECUTOR_H
 #define DORIS_BE_RUNTIME_PLAN_FRAGMENT_EXECUTOR_H
 
-#include <boost/function.hpp>
 #include <boost/scoped_ptr.hpp>
+#include <condition_variable>
+#include <functional>
 #include <vector>
 
 #include "common/object_pool.h"
@@ -28,6 +29,7 @@
 #include "runtime/query_statistics.h"
 #include "runtime/runtime_state.h"
 #include "util/hash_util.hpp"
+#include "util/time.h"
 
 namespace doris {
 
@@ -73,7 +75,7 @@ public:
     // Note: this does not take a const RuntimeProfile&, because it might need to call
     // functions like PrettyPrint() or to_thrift(), neither of which is const
     // because they take locks.
-    typedef boost::function<void(const Status& status, RuntimeProfile* profile, bool done)>
+    typedef std::function<void(const Status& status, RuntimeProfile* profile, bool done)>
             report_status_callback;
 
     // report_status_cb, if !empty(), is used to report the accumulated profile
@@ -141,8 +143,6 @@ public:
 
     DataSink* get_sink() { return _sink.get(); }
 
-    void report_profile_once() { _stop_report_thread_cv.notify_one(); }
-
     void set_is_report_on_cancel(bool val) { _is_report_on_cancel = val; }
 
 private:
@@ -154,15 +154,15 @@ private:
     // profile reporting-related
     report_status_callback _report_status_cb;
     boost::thread _report_thread;
-    boost::mutex _report_thread_lock;
+    std::mutex _report_thread_lock;
 
     // Indicates that profile reporting thread should stop.
     // Tied to _report_thread_lock.
-    boost::condition_variable _stop_report_thread_cv;
+    std::condition_variable _stop_report_thread_cv;
 
     // Indicates that profile reporting thread started.
     // Tied to _report_thread_lock.
-    boost::condition_variable _report_thread_started_cv;
+    std::condition_variable _report_thread_started_cv;
     bool _report_thread_active; // true if we started the thread
 
     // true if _plan->get_next() indicated that it's done
@@ -191,7 +191,7 @@ private:
     // lock ordering:
     // 1. _report_thread_lock
     // 2. _status_lock
-    boost::mutex _status_lock;
+    std::mutex _status_lock;
 
     // note that RuntimeState should be constructed before and destructed after `_sink' and `_row_batch',
     // therefore we declare it before `_sink' and `_row_batch'
@@ -204,6 +204,8 @@ private:
 
     // Number of rows returned by this fragment
     RuntimeProfile::Counter* _rows_produced_counter;
+
+    RuntimeProfile::Counter* _fragment_cpu_timer;
 
     // Average number of thread tokens for the duration of the plan fragment execution.
     // Fragments that do a lot of cpu work (non-coordinator fragment) will have at
@@ -257,7 +259,7 @@ private:
 
     const DescriptorTbl& desc_tbl() { return _runtime_state->desc_tbl(); }
 
-    void collect_query_statistics();
+    void _collect_query_statistics();
 };
 
 // Save the common components of fragments in a query.

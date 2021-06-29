@@ -21,6 +21,7 @@
 #include "olap/row.h"
 #include "olap/row_block.h"
 #include "olap/row_cursor.h"
+#include "olap/rowset/beta_rowset_reader.h"
 
 namespace doris {
 
@@ -40,59 +41,65 @@ OLAPStatus CollectIterator::add_child(RowsetReaderSharedPtr rs_reader) {
     std::unique_ptr<LevelIterator> child(new Level0Iterator(rs_reader, _reader));
     RETURN_NOT_OK(child->init());
     if (child->current_row() == nullptr) {
-        return OLAP_SUCCESS;
+        return OLAP_ERR_DATA_EOF;
     }
 
-    LevelIterator* child_ptr = child.release();
-    _children.push_back(child_ptr);
-    _rs_readers.push_back(rs_reader);
+    _children.push_back(child.release());
     return OLAP_SUCCESS;
 }
 
 // Build a merge heap. If _merge is true, a rowset with the max rownum
 // status will be used as the base rowset, and the other rowsets will be merged first and
 // then merged with the base rowset.
-void CollectIterator::build_heap() {
-    DCHECK(_rs_readers.size() == _children.size());
+void CollectIterator::build_heap(const std::vector<RowsetReaderSharedPtr>& rs_readers) {
+    DCHECK(rs_readers.size() == _children.size());
     _reverse = _reader->_tablet->tablet_schema().keys_type() == KeysType::UNIQUE_KEYS;
     if (_children.empty()) {
         _inner_iter.reset(nullptr);
         return;
     } else if (_merge) {
-        DCHECK(!_rs_readers.empty());
-        // build merge heap with two children， a base rowset as level0iterator and
+        DCHECK(!rs_readers.empty());
+        // build merge heap with two children, a base rowset as level0iterator and
         // other cumulative rowsets as a level1iterator
         if (_children.size() > 1) {
-            // find base rowset(max rownum),
-            RowsetReaderSharedPtr base_reader = _rs_readers[0];
+            // find 'base rowset', 'base rowset' is the rowset which contains the max row number
+            int64_t max_row_num = 0;
             int base_reader_idx = 0;
-            for (size_t i = 1; i < _rs_readers.size(); ++i) {
-                if (_rs_readers[i]->rowset()->rowset_meta()->num_rows() >
-                    base_reader->rowset()->rowset_meta()->num_rows()) {
-                    base_reader = _rs_readers[i];
+            for (size_t i = 0; i < rs_readers.size(); ++i) {
+                int64_t cur_row_num = rs_readers[i]->rowset()->rowset_meta()->num_rows();
+                if (cur_row_num > max_row_num) {
+                    max_row_num = cur_row_num;
                     base_reader_idx = i;
                 }
             }
-            std::vector<LevelIterator*> cumu_children;
-            for (size_t i = 0; i < _rs_readers.size(); ++i) {
+            auto base_reader_child = _children.begin();
+            std::advance(base_reader_child, base_reader_idx);
+
+            std::list<LevelIterator*> cumu_children;
+            int i = 0;
+            for (const auto& child : _children) {
                 if (i != base_reader_idx) {
-                    cumu_children.push_back(_children[i]);
+                    cumu_children.push_back(child);
                 }
+                ++i;
             }
             Level1Iterator* cumu_iter =
                     new Level1Iterator(cumu_children, cumu_children.size() > 1, _reverse);
             cumu_iter->init();
-            std::vector<LevelIterator*> children;
-            children.push_back(_children[base_reader_idx]);
+            std::list<LevelIterator*> children;
+            children.push_back(*base_reader_child);
             children.push_back(cumu_iter);
             _inner_iter.reset(new Level1Iterator(children, _merge, _reverse));
         } else {
+            // _children.size() == 1
             _inner_iter.reset(new Level1Iterator(_children, _merge, _reverse));
         }
     } else {
         _inner_iter.reset(new Level1Iterator(_children, _merge, _reverse));
     }
     _inner_iter->init();
+    // Clear _children earlier to release any related references
+    _children.clear();
 }
 
 bool CollectIterator::LevelIteratorComparator::operator()(const LevelIterator* a,
@@ -114,16 +121,6 @@ bool CollectIterator::LevelIteratorComparator::operator()(const LevelIterator* a
     return a->version() > b->version();
 }
 
-void CollectIterator::clear() {
-    for (auto child : _children) {
-        if (child != nullptr) {
-            delete child;
-            child = nullptr;
-        }
-    }
-    _children.clear();
-}
-
 const RowCursor* CollectIterator::current_row(bool* delete_flag) const {
     if (LIKELY(_inner_iter)) {
         return _inner_iter->current_row(delete_flag);
@@ -140,7 +137,14 @@ OLAPStatus CollectIterator::next(const RowCursor** row, bool* delete_flag) {
 }
 
 CollectIterator::Level0Iterator::Level0Iterator(RowsetReaderSharedPtr rs_reader, Reader* reader)
-        : _rs_reader(rs_reader), _is_delete(rs_reader->delete_flag()), _reader(reader) {}
+        : _rs_reader(rs_reader), _is_delete(rs_reader->delete_flag()), _reader(reader) {
+    auto* ans = dynamic_cast<BetaRowsetReader*>(rs_reader.get());
+    if (LIKELY(ans != nullptr)) {
+        _refresh_current_row = &Level0Iterator::_refresh_current_row_v2;
+    } else {
+        _refresh_current_row = &Level0Iterator::_refresh_current_row_v1;
+    }
+}
 
 CollectIterator::Level0Iterator::~Level0Iterator() {}
 
@@ -150,7 +154,7 @@ OLAPStatus CollectIterator::Level0Iterator::init() {
         LOG(WARNING) << "failed to init row cursor, res=" << res;
         return res;
     }
-    RETURN_NOT_OK(_refresh_current_row());
+    RETURN_NOT_OK((this->*_refresh_current_row)());
     return OLAP_SUCCESS;
 }
 
@@ -163,18 +167,17 @@ const RowCursor* CollectIterator::Level0Iterator::current_row() const {
     return _current_row;
 }
 
-int32_t CollectIterator::Level0Iterator::version() const {
+int64_t CollectIterator::Level0Iterator::version() const {
     return _rs_reader->version().second;
 }
 
-OLAPStatus CollectIterator::Level0Iterator::_refresh_current_row() {
+OLAPStatus CollectIterator::Level0Iterator::_refresh_current_row_v1() {
     do {
         if (_row_block != nullptr && _row_block->has_remaining()) {
             size_t pos = _row_block->pos();
             _row_block->get_row(pos, &_row_cursor);
             if (_row_block->block_status() == DEL_PARTIAL_SATISFIED &&
-                _reader->_delete_handler.is_filter_data(_rs_reader->version().second,
-                                                        _row_cursor)) {
+                _reader->_delete_handler.is_filter_data(version(), _row_cursor)) {
                 _reader->_stats.rows_del_filtered++;
                 _row_block->pos_inc();
                 continue;
@@ -193,9 +196,28 @@ OLAPStatus CollectIterator::Level0Iterator::_refresh_current_row() {
     return OLAP_ERR_DATA_EOF;
 }
 
+OLAPStatus CollectIterator::Level0Iterator::_refresh_current_row_v2() {
+    do {
+        if (_row_block != nullptr && _row_block->has_remaining()) {
+            size_t pos = _row_block->pos();
+            _row_block->get_row(pos, &_row_cursor);
+            _current_row = &_row_cursor;
+            return OLAP_SUCCESS;
+        } else {
+            auto res = _rs_reader->next_block(&_row_block);
+            if (res != OLAP_SUCCESS) {
+                _current_row = nullptr;
+                return res;
+            }
+        }
+    } while (_row_block != nullptr);
+    _current_row = nullptr;
+    return OLAP_ERR_DATA_EOF;
+}
+
 OLAPStatus CollectIterator::Level0Iterator::next(const RowCursor** row, bool* delete_flag) {
     _row_block->pos_inc();
-    auto res = _refresh_current_row();
+    auto res = (this->*_refresh_current_row)();
     *row = _current_row;
     *delete_flag = _is_delete;
     if (_current_row != nullptr) {
@@ -205,7 +227,7 @@ OLAPStatus CollectIterator::Level0Iterator::next(const RowCursor** row, bool* de
 }
 
 CollectIterator::Level1Iterator::Level1Iterator(
-        const std::vector<CollectIterator::LevelIterator*>& children, bool merge, bool reverse)
+        const std::list<CollectIterator::LevelIterator*>& children, bool merge, bool reverse)
         : _children(children), _merge(merge), _reverse(reverse) {}
 
 CollectIterator::LevelIterator::~LevelIterator() {}
@@ -225,7 +247,7 @@ CollectIterator::Level1Iterator::~Level1Iterator() {
 //      OLAP_ERR_DATA_EOF and set *row to nullptr when EOF is reached.
 //      Others when error happens
 OLAPStatus CollectIterator::Level1Iterator::next(const RowCursor** row, bool* delete_flag) {
-    if (UNLIKELY(_children.size() == 0)) {
+    if (UNLIKELY(_cur_child == nullptr)) {
         return OLAP_ERR_DATA_EOF;
     }
     if (_merge) {
@@ -251,7 +273,7 @@ const RowCursor* CollectIterator::Level1Iterator::current_row() const {
     return nullptr;
 }
 
-int32_t CollectIterator::Level1Iterator::version() const {
+int64_t CollectIterator::Level1Iterator::version() const {
     if (_cur_child != nullptr) {
         return _cur_child->version();
     }
@@ -259,23 +281,25 @@ int32_t CollectIterator::Level1Iterator::version() const {
 }
 
 OLAPStatus CollectIterator::Level1Iterator::init() {
-    if (_children.size() == 0) {
+    if (_children.empty()) {
         return OLAP_SUCCESS;
     }
+
     // Only when there are multiple children that need to be merged
     if (_merge && _children.size() > 1) {
         _heap.reset(new MergeHeap(LevelIteratorComparator(_reverse)));
         for (auto child : _children) {
-            if (child == nullptr || child->current_row() == nullptr) {
-                continue;
-            }
+            DCHECK(child != nullptr);
+            DCHECK(child->current_row() != nullptr);
             _heap->push(child);
-            _cur_child = _heap->top();
         }
+        _cur_child = _heap->top();
+        // Clear _children earlier to release any related references
+        _children.clear();
     } else {
         _merge = false;
         _heap.reset(nullptr);
-        _cur_child = _children[_child_idx];
+        _cur_child = *(_children.begin());
     }
     return OLAP_SUCCESS;
 }
@@ -284,10 +308,12 @@ inline OLAPStatus CollectIterator::Level1Iterator::_merge_next(const RowCursor**
                                                                bool* delete_flag) {
     _heap->pop();
     auto res = _cur_child->next(row, delete_flag);
-    if (res == OLAP_SUCCESS) {
+    if (LIKELY(res == OLAP_SUCCESS)) {
         _heap->push(_cur_child);
         _cur_child = _heap->top();
     } else if (res == OLAP_ERR_DATA_EOF) {
+        // current child has been read, to read next
+        delete _cur_child;
         if (!_heap->empty()) {
             _cur_child = _heap->top();
         } else {
@@ -295,6 +321,7 @@ inline OLAPStatus CollectIterator::Level1Iterator::_merge_next(const RowCursor**
             return OLAP_ERR_DATA_EOF;
         }
     } else {
+        _cur_child = nullptr;
         LOG(WARNING) << "failed to get next from child, res=" << res;
         return res;
     }
@@ -308,10 +335,11 @@ inline OLAPStatus CollectIterator::Level1Iterator::_normal_next(const RowCursor*
     if (LIKELY(res == OLAP_SUCCESS)) {
         return OLAP_SUCCESS;
     } else if (res == OLAP_ERR_DATA_EOF) {
-        // this child has been read, to read next
-        _child_idx++;
-        if (_child_idx < _children.size()) {
-            _cur_child = _children[_child_idx];
+        // current child has been read, to read next
+        delete _cur_child;
+        _children.pop_front();
+        if (!_children.empty()) {
+            _cur_child = *(_children.begin());
             *row = _cur_child->current_row(delete_flag);
             return OLAP_SUCCESS;
         } else {
@@ -319,6 +347,7 @@ inline OLAPStatus CollectIterator::Level1Iterator::_normal_next(const RowCursor*
             return OLAP_ERR_DATA_EOF;
         }
     } else {
+        _cur_child = nullptr;
         LOG(WARNING) << "failed to get next from child, res=" << res;
         return res;
     }

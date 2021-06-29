@@ -45,7 +45,6 @@ import org.apache.doris.journal.JournalCursor;
 import org.apache.doris.journal.JournalEntity;
 import org.apache.doris.journal.bdbje.BDBJEJournal;
 import org.apache.doris.journal.bdbje.Timestamp;
-import org.apache.doris.load.AsyncDeleteJob;
 import org.apache.doris.load.DeleteHandler;
 import org.apache.doris.load.DeleteInfo;
 import org.apache.doris.load.ExportJob;
@@ -53,6 +52,7 @@ import org.apache.doris.load.ExportMgr;
 import org.apache.doris.load.Load;
 import org.apache.doris.load.LoadErrorHub;
 import org.apache.doris.load.LoadJob;
+import org.apache.doris.load.StreamLoadRecordMgr.FetchStreamLoadRecord;
 import org.apache.doris.load.loadv2.LoadJob.LoadJobStateUpdateInfo;
 import org.apache.doris.load.loadv2.LoadJobFinalOperation;
 import org.apache.doris.load.routineload.RoutineLoadJob;
@@ -184,7 +184,7 @@ public class EditLog {
                     RefreshExternalTableInfo info = (RefreshExternalTableInfo) journal.getData();
                     LOG.info("Begin to unprotect alter external table schema. db = "
                             + info.getDbName() + " table = " + info.getTableName());
-                    catalog.replayAlterExteranlTableSchema(info.getDbName(), info.getTableName(), info.getNewSchema());
+                    catalog.replayAlterExternalTableSchema(info.getDbName(), info.getTableName(), info.getNewSchema());
                     break;
                 }
                 case OperationType.OP_DROP_TABLE: {
@@ -393,22 +393,10 @@ public class EditLog {
                     ExportMgr exportMgr = catalog.getExportMgr();
                     exportMgr.replayUpdateJobState(op.getJobId(), op.getState());
                     break;
-                case OperationType.OP_FINISH_SYNC_DELETE: {
-                    DeleteInfo info = (DeleteInfo) journal.getData();
-                    Load load = catalog.getLoadInstance();
-                    load.replayDelete(info, catalog);
-                    break;
-                }
                 case OperationType.OP_FINISH_DELETE: {
                     DeleteInfo info = (DeleteInfo) journal.getData();
                     DeleteHandler deleteHandler = catalog.getDeleteHandler();
                     deleteHandler.replayDelete(info, catalog);
-                    break;
-                }
-                case OperationType.OP_FINISH_ASYNC_DELETE: {
-                    AsyncDeleteJob deleteJob = (AsyncDeleteJob) journal.getData();
-                    Load load = catalog.getLoadInstance();
-                    load.replayFinishAsyncDeleteJob(deleteJob, catalog);
                     break;
                 }
                 case OperationType.OP_ADD_REPLICA: {
@@ -608,6 +596,11 @@ public class EditLog {
                     LOG.debug("opcode: {}, tid: {}", opCode, state.getTransactionId());
                     break;
                 }
+                case OperationType.OP_BATCH_REMOVE_TXNS: {
+                    final BatchRemoveTransactionsOperation operation = (BatchRemoveTransactionsOperation) journal.getData();
+                    Catalog.getCurrentGlobalTransactionMgr().replayBatchRemoveTransactions(operation);
+                    break;
+                }
                 case OperationType.OP_CREATE_REPOSITORY: {
                     Repository repository = (Repository) journal.getData();
                     catalog.getBackupHandler().getRepoMgr().addAndInitRepoIfNotExist(repository, true);
@@ -702,6 +695,11 @@ public class EditLog {
                 case OperationType.OP_UPDATE_LOAD_JOB: {
                     LoadJobStateUpdateInfo info = (LoadJobStateUpdateInfo) journal.getData();
                     catalog.getLoadManager().replayUpdateLoadJobStateInfo(info);
+                    break;
+                }
+                case OperationType.OP_FETCH_STREAM_LOAD_RECORD: {
+                    FetchStreamLoadRecord fetchStreamLoadRecord = (FetchStreamLoadRecord) journal.getData();
+                    catalog.getStreamLoadRecordMgr().replayFetchStreamLoadRecord(fetchStreamLoadRecord);
                     break;
                 }
                 case OperationType.OP_CREATE_RESOURCE: {
@@ -855,8 +853,9 @@ public class EditLog {
 
         try {
             journal.write(op, writable);
-        } catch (Exception e) {
-            LOG.error("Fatal Error : write stream Exception", e);
+        } catch (Throwable t) {
+            // Throwable contains all Exception and Error, such as IOException and OutOfMemoryError
+            LOG.error("Fatal Error : write stream Exception", t);
             System.exit(-1);
         }
 
@@ -1059,16 +1058,8 @@ public class EditLog {
         logEdit(OperationType.OP_REMOVE_FRONTEND, fe);
     }
 
-    public void logFinishSyncDelete(DeleteInfo info) {
-        logEdit(OperationType.OP_FINISH_SYNC_DELETE, info);
-    }
-
     public void logFinishDelete(DeleteInfo info) {
         logEdit(OperationType.OP_FINISH_DELETE, info);
-    }
-
-    public void logFinishAsyncDelete(AsyncDeleteJob job) {
-        logEdit(OperationType.OP_FINISH_ASYNC_DELETE, job);
     }
 
     public void logAddReplica(ReplicaPersistInfo info) {
@@ -1220,11 +1211,7 @@ public class EditLog {
     public void logInsertTransactionState(TransactionState transactionState) {
         logEdit(OperationType.OP_UPSERT_TRANSACTION_STATE, transactionState);
     }
-
-    public void logDeleteTransactionState(TransactionState transactionState) {
-        logEdit(OperationType.OP_DELETE_TRANSACTION_STATE, transactionState);
-    }
-
+    
     public void logBackupJob(BackupJob job) {
         logEdit(OperationType.OP_BACKUP_JOB, job);
     }
@@ -1313,6 +1300,10 @@ public class EditLog {
         logEdit(OperationType.OP_UPDATE_LOAD_JOB, info);
     }
 
+    public void logFetchStreamLoadRecord(FetchStreamLoadRecord fetchStreamLoadRecord) {
+        logEdit(OperationType.OP_FETCH_STREAM_LOAD_RECORD, fetchStreamLoadRecord);
+    }
+
     public void logCreateResource(Resource resource) {
         logEdit(OperationType.OP_CREATE_RESOURCE, resource);
     }
@@ -1383,5 +1374,9 @@ public class EditLog {
 
     public void logReplaceTable(ReplaceTableOperationLog log) {
         logEdit(OperationType.OP_REPLACE_TABLE, log);
+    }
+
+    public void logBatchRemoveTransactions(BatchRemoveTransactionsOperation op) {
+        logEdit(OperationType.OP_BATCH_REMOVE_TXNS, op);
     }
 }

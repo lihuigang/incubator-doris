@@ -273,6 +273,12 @@ public:
     int minute() const { return _minute; }
     int second() const { return _second; }
 
+    bool check_loss_accuracy_cast_to_date() {
+        auto loss_accuracy = _hour != 0 || _minute != 0 || _second != 0 || _microsecond != 0;
+        cast_to_date();
+        return loss_accuracy;
+    }
+    
     void cast_to_date() {
         _hour = 0;
         _minute = 0;
@@ -326,6 +332,8 @@ public:
     //      Otherwise it is the last week of the previous year, and the
     //      next week is week 1.
     uint8_t week(uint8_t) const;
+
+    uint32_t year_week(uint8_t mode) const;
 
     // Add interval
     bool date_add_interval(const TimeInterval& interval, TimeUnit unit);
@@ -420,9 +428,15 @@ public:
         return std::string(buf, end - buf);
     }
 
-    static DateTimeValue datetime_min_value() { return _s_min_datetime_value; }
+    static DateTimeValue datetime_min_value() {
+        static DateTimeValue _s_min_datetime_value(0, TIME_DATETIME, 0, 0, 0, 0, 0, 1, 1);
+        return _s_min_datetime_value;
+    }
 
-    static DateTimeValue datetime_max_value() { return _s_max_datetime_value; }
+    static DateTimeValue datetime_max_value() {
+        static DateTimeValue _s_max_datetime_value(0, TIME_DATETIME, 23, 59, 59, 0, 9999, 12, 31);
+        return _s_max_datetime_value;
+    }
 
     int64_t second_diff(const DateTimeValue& rhs) const {
         int day_diff = daynr() - rhs.daynr();
@@ -536,8 +550,6 @@ private:
               _day(day),
               _microsecond(microsecond) {}
 
-    static DateTimeValue _s_min_datetime_value;
-    static DateTimeValue _s_max_datetime_value;
     // RE2 obj is thread safe
     static RE2 time_zone_offset_format_reg;
 };

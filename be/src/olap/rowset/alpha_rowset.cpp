@@ -22,6 +22,7 @@
 #include "olap/rowset/alpha_rowset_reader.h"
 #include "olap/rowset/rowset_meta_manager.h"
 #include "util/hash_util.hpp"
+#include <util/file_utils.h>
 
 namespace doris {
 
@@ -29,7 +30,7 @@ AlphaRowset::AlphaRowset(const TabletSchema* schema, std::string rowset_path,
                          RowsetMetaSharedPtr rowset_meta)
         : Rowset(schema, std::move(rowset_path), std::move(rowset_meta)) {}
 
-OLAPStatus AlphaRowset::do_load(bool use_cache) {
+OLAPStatus AlphaRowset::do_load(bool use_cache, std::shared_ptr<MemTracker>) {
     for (auto& segment_group : _segment_groups) {
         // validate segment group
         if (segment_group->validate() != OLAP_SUCCESS) {
@@ -64,7 +65,7 @@ OLAPStatus AlphaRowset::create_reader(const std::shared_ptr<MemTracker>& parent_
 }
 
 OLAPStatus AlphaRowset::remove() {
-    VLOG(3) << "begin to remove files in rowset " << unique_id() << ", version:" << start_version()
+    VLOG_NOTICE << "begin to remove files in rowset " << unique_id() << ", version:" << start_version()
             << "-" << end_version() << ", tabletid:" << _rowset_meta->tablet_id();
     for (auto segment_group : _segment_groups) {
         bool ret = segment_group->delete_all_files();
@@ -171,7 +172,7 @@ OLAPStatus AlphaRowset::split_range(const RowCursor& start_key, const RowCursor&
     std::shared_ptr<SegmentGroup> largest_segment_group = _segment_group_with_largest_size();
     if (largest_segment_group == nullptr ||
         largest_segment_group->current_num_rows_per_row_block() == 0) {
-        LOG(WARNING) << "failed to get largest_segment_group. is null: "
+        VLOG_NOTICE << "failed to get largest_segment_group. is null: "
                      << (largest_segment_group == nullptr) << ". version: " << start_version()
                      << "-" << end_version() << ". tablet: " << rowset_meta()->tablet_id();
         ranges->emplace_back(start_key.to_tuple());
@@ -201,7 +202,7 @@ OLAPStatus AlphaRowset::split_range(const RowCursor& start_key, const RowCursor&
     }
 
     step_pos = start_pos;
-    VLOG(3) << "start_pos=" << start_pos.segment << ", " << start_pos.index_offset;
+    VLOG_NOTICE << "start_pos=" << start_pos.segment << ", " << start_pos.index_offset;
 
     //find last row_block is end_key is given, or using last_row_block
     if (largest_segment_group->find_short_key(end_key, &helper_cursor, false, &end_pos) !=
@@ -212,7 +213,7 @@ OLAPStatus AlphaRowset::split_range(const RowCursor& start_key, const RowCursor&
         }
     }
 
-    VLOG(3) << "end_pos=" << end_pos.segment << ", " << end_pos.index_offset;
+    VLOG_NOTICE << "end_pos=" << end_pos.segment << ", " << end_pos.index_offset;
 
     //get rows between first and last
     OLAPStatus res = OLAP_SUCCESS;
@@ -280,6 +281,24 @@ bool AlphaRowset::check_path(const std::string& path) {
     return valid_paths.find(path) != valid_paths.end();
 }
 
+bool AlphaRowset::check_file_exist() {
+    for (auto& segment_group : _segment_groups) {
+        for (int i = 0; i < segment_group->num_segments(); ++i) {
+            std::string data_path = segment_group->construct_data_file_path(i);
+            if (!FileUtils::check_exist(data_path)) {
+                LOG(WARNING) << "data file not existed: " << data_path << " for rowset_id: " << rowset_id();
+                return false;
+            }
+            std::string index_path = segment_group->construct_index_file_path(i);
+            if (!FileUtils::check_exist(index_path)) {
+                LOG(WARNING) << "index file not existed: " << index_path << " for rowset_id: " << rowset_id();
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 OLAPStatus AlphaRowset::init() {
     std::vector<SegmentGroupPB> segment_group_metas;
     AlphaRowsetMetaSharedPtr _alpha_rowset_meta =
@@ -310,26 +329,27 @@ OLAPStatus AlphaRowset::init() {
         if (segment_group_meta.zone_maps_size() != 0) {
             size_t zone_maps_size = segment_group_meta.zone_maps_size();
             // after 0.12.10 the value column in duplicate table also has zone map.
-            size_t expect_zone_maps_num = _schema->keys_type() == KeysType::DUP_KEYS
+            // after 0.14 the value column in duplicate table also has zone map.
+            size_t expect_zone_maps_num = _schema->keys_type() != KeysType::AGG_KEYS
                                                   ? _schema->num_columns()
                                                   : _schema->num_key_columns();
-            if ((_schema->keys_type() != KeysType::DUP_KEYS &&
+            if ((_schema->keys_type() == KeysType::AGG_KEYS &&
                  expect_zone_maps_num != zone_maps_size) ||
-                (_schema->keys_type() == KeysType::DUP_KEYS &&
+                (_schema->keys_type() != KeysType::AGG_KEYS &&
                  expect_zone_maps_num < zone_maps_size)) {
-                LOG(ERROR) << "column pruning size is error."
+                LOG(ERROR) << "column pruning size is error. "
                            << "KeysType=" << KeysType_Name(_schema->keys_type()) << ", "
                            << "zone_maps_size=" << zone_maps_size << ", "
                            << "num_key_columns=" << _schema->num_key_columns() << ", "
                            << "num_columns=" << _schema->num_columns();
                 return OLAP_ERR_TABLE_INDEX_VALIDATE_ERROR;
             }
-            // Before 0.12.10, the zone map columns number in duplicate table is the same with the key column numbers,
-            // but after 0.12.10 we build zone map for the value column, so when first start the two number is not the same,
+            // Before 0.12.10, the zone map columns number in duplicate/unique table is the same with the key column numbers,
+            // but after 0.12.10 we build zone map for duplicate table value column, after 0.14 we build zone map for unique
+            // table value column, so when first start the two number is not the same,
             // it causes start failed. When `expect_zone_maps_num > zone_maps_size` it may be the first start after upgrade
             if (expect_zone_maps_num > zone_maps_size) {
-                LOG(WARNING)
-                        << "tablet: " << _rowset_meta->tablet_id() << " expect zone map size is "
+                VLOG_CRITICAL << "tablet: " << _rowset_meta->tablet_id() << " expect zone map size is "
                         << expect_zone_maps_num << ", actual num is " << zone_maps_size
                         << ". If this is not the first start after upgrade, please pay attention!";
             }

@@ -112,6 +112,7 @@ message PTabletWriterCancelResult {
 };
 
 message PExecPlanFragmentRequest {
+    optional bytes request = 1;
 };
 
 message PExecPlanFragmentResult {
@@ -137,6 +138,7 @@ message PCancelPlanFragmentResult {
 
 message PFetchDataRequest {
     required PUniqueId finst_id = 1;
+    optional bool resp_in_attachment = 2;
 };
 
 message PFetchDataResult {
@@ -145,6 +147,8 @@ message PFetchDataResult {
     optional int64 packet_seq = 2;
     optional bool eos = 3;
     optional PQueryStatistics query_statistics = 4;
+    optional bytes row_batch = 5;
+    optional bool empty_batch = 6;
 };
 
 //Add message definition to fetch and update cache
@@ -158,6 +162,11 @@ enum PCacheStatus {
     INVALID_KEY_RANGE = 6;
     DATA_OVERDUE = 7;
     EMPTY_DATA = 8;
+};
+
+enum CacheType {
+    SQL_CACHE = 1;
+    PARTITION_CACHE = 2;
 };
 
 message PCacheParam {
@@ -180,6 +189,7 @@ message PCacheResponse {
 message PUpdateCacheRequest{
     required PUniqueId sql_key = 1;
     repeated PCacheValue values = 2;
+    optional CacheType cache_type = 3;
 };
 
 message PFetchCacheRequest {
@@ -190,6 +200,7 @@ message PFetchCacheRequest {
 message PFetchCacheResult {
     required PCacheStatus status = 1;
     repeated PCacheValue values = 2;
+    optional int64 all_count = 3 [default = 0];
 };
 
 enum PClearType {
@@ -206,17 +217,14 @@ message PClearCacheRequest {
 };
 //End cache proto definition
 
-message PTriggerProfileReportRequest {
-    repeated PUniqueId instance_ids = 1;
-};
-
-message PTriggerProfileReportResult {
-    required PStatus status = 1;
-};
-
 message PStringPair {
     required string key = 1;
     required string val = 2;
+};
+
+message PIntegerPair {
+    required int32 key = 1;
+    required int64 val = 2;
 };
 
 message PKafkaLoadInfo {
@@ -227,6 +235,7 @@ message PKafkaLoadInfo {
 
 message PKafkaMetaProxyRequest {
     optional PKafkaLoadInfo kafka_info = 1;
+    repeated PIntegerPair offset_times = 3;
 };
 
 message PProxyRequest {
@@ -237,9 +246,14 @@ message PKafkaMetaProxyResult {
     repeated int32 partition_ids = 1;
 };
 
+message PKafkaPartitionOffsets {
+    repeated PIntegerPair offset_times = 1;
+};
+
 message PProxyResult {
     required PStatus status = 1;
     optional PKafkaMetaProxyResult kafka_meta_result = 2;
+	optional PKafkaPartitionOffsets partition_offsets = 3;
 };
 
 // NOTE(zc): If you want to add new method here,
@@ -252,7 +266,6 @@ service PBackendService {
     rpc tablet_writer_open(PTabletWriterOpenRequest) returns (PTabletWriterOpenResult);
     rpc tablet_writer_add_batch(PTabletWriterAddBatchRequest) returns (PTabletWriterAddBatchResult);
     rpc tablet_writer_cancel(PTabletWriterCancelRequest) returns (PTabletWriterCancelResult);
-    rpc trigger_profile_report(PTriggerProfileReportRequest) returns (PTriggerProfileReportResult);
     rpc get_info(PProxyRequest) returns (PProxyResult); 
     rpc update_cache(PUpdateCacheRequest) returns (PCacheResponse);
     rpc fetch_cache(PFetchCacheRequest) returns (PFetchCacheResult);
