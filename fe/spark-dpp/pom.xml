@@ -83,13 +83,13 @@ under the License.
         <dependency>
             <groupId>junit</groupId>
             <artifactId>junit</artifactId>
-            <scope>test</scope>
+            <scope>provided</scope>
         </dependency>
 
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-log4j12</artifactId>
-            <scope>test</scope>
+            <scope>provided</scope>
         </dependency>
 
         <dependency>
@@ -103,6 +103,26 @@ under the License.
             <groupId>org.apache.spark</groupId>
             <artifactId>spark-core_2.12</artifactId>
             <scope>provided</scope>
+            <exclusions>
+                <exclusion>
+                    <artifactId>hadoop-annotations</artifactId>
+                    <groupId>org.apache.hadoop</groupId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <dependency>
+            <groupId>com.fasterxml.jackson.core</groupId>
+            <artifactId>jackson-databind</artifactId>
+            <version>2.10.0</version>
+            <scope>compile</scope>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.hadoop</groupId>
+            <artifactId>hadoop-mapreduce-client-core</artifactId>
+            <version>2.7.2</version>
+            <scope>compile</scope>
         </dependency>
 
 		<!-- https://mvnrepository.com/artifact/org.apache.spark/spark-sql_2.12 -->
@@ -110,6 +130,18 @@ under the License.
             <groupId>org.apache.spark</groupId>
             <artifactId>spark-sql_2.12</artifactId>
             <scope>provided</scope>
+        </dependency>
+
+<!--        <dependency>-->
+<!--            <groupId>org.apache.spark</groupId>-->
+<!--            <artifactId>spark-hive_2.12</artifactId>-->
+<!--            <scope>provided</scope>-->
+<!--        </dependency>-->
+
+        <dependency>
+            <groupId>org.apache.spark</groupId>
+            <artifactId>spark-hive_2.12</artifactId>
+            <version>2.4.6</version>
         </dependency>
 
         <dependency>
@@ -158,12 +190,29 @@ under the License.
             <groupId>org.apache.spark</groupId>
             <artifactId>spark-catalyst_2.12</artifactId>
             <version>2.4.6</version>
-            <scope>provided</scope>
+            <scope>compile</scope>
+            <exclusions>
+                <exclusion>
+                    <artifactId>janino</artifactId>
+                    <groupId>org.codehaus.janino</groupId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+
+        <dependency>
+            <groupId>org.codehaus.janino</groupId>
+            <artifactId>janino</artifactId>
+            <version>3.0.8</version>
+            <scope>compile</scope>
         </dependency>
 
         <dependency>
             <groupId>com.google.guava</groupId>
             <artifactId>guava</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.commons</groupId>
+            <artifactId>commons-lang3</artifactId>
         </dependency>
     </dependencies>
 
@@ -426,4 +475,18 @@ under the License.
         </pluginManagement>
 
     </build>
+
+    <repositories>
+        <repository>
+            <id>alimaven</id>
+            <name>aliyun maven</name>
+            <url>http://maven.aliyun.com/nexus/content/groups/public/</url>
+            <releases>
+                <enabled>true</enabled>
+            </releases>
+            <snapshots>
+                <enabled>false</enabled>
+            </snapshots>
+        </repository>
+    </repositories>
 </project>
